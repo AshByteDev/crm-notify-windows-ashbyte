@@ -4,6 +4,7 @@ package platform
 
 import (
 	"os"
+	"os/exec"
 	"syscall"
 	"unsafe"
 
@@ -57,6 +58,28 @@ func OpenURL(u string) error {
 		return syscall.Errno(r)
 	}
 	return nil
+}
+
+// Replace puts the downloaded version in place of the running file (a running .exe cannot be overwritten but can
+// be renamed) and starts it; the caller quits. The old file is removed by the next start (CleanupOld).
+func Replace(running, downloaded string) error {
+	old := running + ".old"
+	_ = os.Remove(old)
+	if err := os.Rename(running, old); err != nil {
+		return err
+	}
+	if err := os.Rename(downloaded, running); err != nil {
+		_ = os.Rename(old, running)
+		return err
+	}
+	return exec.Command(running, "--updated").Start()
+}
+
+// CleanupOld removes the file left by the previous update.
+func CleanupOld() {
+	if exe, err := os.Executable(); err == nil {
+		_ = os.Remove(exe + ".old")
+	}
 }
 
 const runKey = `Software\Microsoft\Windows\CurrentVersion\Run`

@@ -38,6 +38,9 @@ const (
 	cmdAutostart
 	cmdUpdates
 	cmdQuit
+	cmdPortal
+	cmdCheckNow
+	cmdUpdateNow
 )
 
 // what a click hits on a card
@@ -76,12 +79,33 @@ type UI struct {
 	byHwnd    map[uintptr]*slot
 	fonts     map[string]uintptr
 	signinOK  bool // the person closed the «sign in» card
+
+	portal       portal
+	portalAsked  bool
+	portalResult atomic.Pointer[error]
 }
 
 // AlreadyRunning holds a named mutex for the session of the user: a second start just exits.
 func AlreadyRunning() bool {
-	_, _, err := pCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(utf16(`Local\AshCRMNotify`))))
-	return err == syscall.Errno(errAlreadyExis)
+	h, _, err := pCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(utf16(`Local\AshCRMNotify`))))
+	if err == syscall.Errno(errAlreadyExis) {
+		pCloseHandle.Call(h) // our handle must not keep the mutex of the other copy alive
+		return true
+	}
+	return false
+}
+
+// Quit closes the app (from any goroutine): the tray window goes, the message loop ends.
+func (u *UI) Quit() {
+	if h := u.trayReady.Load(); h != 0 {
+		pPostMessageW.Call(h, wmClose, 0, 0)
+	}
+}
+
+// confirm asks yes/no.
+func confirm(text string) bool {
+	r, _, _ := pMessageBoxW.Call(0, uintptr(unsafe.Pointer(utf16(text))), uintptr(unsafe.Pointer(utf16("AshCRM Notify"))), 0x4|0x20) // YESNO|QUESTION
+	return r == 6                                                                                                                    // IDYES
 }
 
 // Message shows a message box (errors before the tray exists).
@@ -129,6 +153,9 @@ func (u *UI) Run() error {
 	if r, _, err := pRegisterClassExW.Call(ptr(&cardClass)); r == 0 {
 		return fmt.Errorf("register card class: %w", err)
 	}
+	if err := u.registerPortal(); err != nil {
+		return fmt.Errorf("register portal class: %w", err)
+	}
 	u.tray, _, _ = pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(trayClass.ClassName)), 0, 0, 0, 0, 0, 0, 0, 0, u.inst, 0)
 	if u.tray == 0 {
 		return fmt.Errorf("create tray window")
@@ -151,6 +178,11 @@ func (u *UI) Run() error {
 		r, _, _ := pGetMessageW.Call(ptr(&m), 0, 0, 0)
 		if int32(r) <= 0 {
 			break
+		}
+		if u.portal.hwnd != 0 {
+			if done, _, _ := pIsDialogMessageW.Call(u.portal.hwnd, ptr(&m)); done != 0 {
+				continue // Tab and Enter in the window of the address
+			}
 		}
 		pTranslateMessage.Call(ptr(&m))
 		pDispatchMessageW.Call(ptr(&m))
@@ -210,6 +242,8 @@ func tipOf(v app.View) string {
 		s += "нет связи, переподключаюсь"
 	case app.SigningIn:
 		s += "вход в браузере…"
+	case app.NeedServer:
+		s += "укажите адрес портала"
 	default:
 		s += "войдите в приложение"
 	}
@@ -246,7 +280,9 @@ func (u *UI) trayProc(hwnd, m, wp, lp uintptr) uintptr {
 		switch uint32(lp) {
 		case wmLButtonUp:
 			v := u.A.View()
-			if v.State == app.SignedOut {
+			if v.State == app.NeedServer {
+				u.showPortal(v.DefaultServer)
+			} else if v.State == app.SignedOut {
 				u.A.Login(u.Ctx)
 			} else {
 				u.signinOK = false
@@ -258,6 +294,9 @@ func (u *UI) trayProc(hwnd, m, wp, lp uintptr) uintptr {
 		return 0
 	case wmRefresh:
 		u.refresh()
+		return 0
+	case wmPortalDone:
+		u.portalDone()
 		return 0
 	case wmPowerBroadcast:
 		if wp == pbtResumeAutomatic {
@@ -299,17 +338,33 @@ func (u *UI) menu() {
 		add(0, v.Error, mfGrayed)
 	}
 	sep()
-	if v.State == app.SignedOut {
+	switch v.State {
+	case app.NeedServer:
+		add(cmdPortal, "Указать адрес портала…", mfString)
+	case app.SignedOut:
 		add(cmdLogin, "Войти…", mfString)
-	} else {
+	default:
 		add(cmdOpenCRM, "Открыть AshCRM", mfString)
 	}
 	add(cmdDND, "Не беспокоить", check(v.DND))
 	sep()
-	add(cmdAutostart, "Запускать вместе с Windows", check(v.Autostart))
-	add(cmdUpdates, "Проверять обновления", check(v.CheckUpdates))
-	if v.State != app.SignedOut && v.State != app.SigningIn {
+	if v.Server != "" {
+		add(0, "Портал: "+strings.TrimPrefix(strings.TrimPrefix(v.Server, "https://"), "http://"), mfGrayed)
+		add(cmdPortal, "Сменить портал…", mfString)
+	}
+	if v.State != app.SignedOut && v.State != app.SigningIn && v.State != app.NeedServer {
 		add(cmdLogout, "Выйти из аккаунта", mfString)
+	}
+	sep()
+	add(cmdAutostart, "Запускать вместе с Windows", check(v.Autostart))
+	add(cmdUpdates, "Проверять обновления автоматически", check(v.CheckUpdates))
+	switch {
+	case v.Updating:
+		add(0, "Обновляю…", mfGrayed)
+	case v.Update != nil:
+		add(cmdUpdateNow, "Обновить до версии "+v.Update.Version, mfString)
+	default:
+		add(cmdCheckNow, "Проверить обновления", mfString)
 	}
 	sep()
 	add(0, "Версия "+v.Version, mfGrayed)
@@ -335,6 +390,24 @@ func (u *UI) menu() {
 		u.A.SetCheckUpdates(!v.CheckUpdates)
 	case cmdQuit:
 		pDestroyWindow.Call(u.tray)
+	case cmdPortal:
+		if v.State == app.NeedServer {
+			u.showPortal(v.DefaultServer)
+		} else if confirm("Сменить портал? Приложение выйдет из аккаунта на " + v.Server + ".") {
+			go u.A.ChangeServer(u.Ctx)
+		}
+	case cmdCheckNow:
+		go func() {
+			r, err := u.A.CheckUpdate(u.Ctx)
+			switch {
+			case err != nil:
+				Message("Не удалось проверить обновления: " + err.Error())
+			case r == nil:
+				Message("Установлена последняя версия " + v.Version + ".")
+			}
+		}()
+	case cmdUpdateNow:
+		go func() { _ = u.A.Update(u.Ctx) }()
 	}
 }
 
@@ -350,6 +423,14 @@ func (u *UI) refresh() {
 		card       api.Card
 	}
 	var list []want
+	if v.State == app.NeedServer {
+		if !u.portalAsked {
+			u.portalAsked = true
+			u.showPortal(v.DefaultServer)
+		}
+	} else {
+		u.portalAsked = false
+	}
 	if v.State == app.SignedOut && !u.signinOK {
 		list = append(list, want{kind: "signin", text: v.Error})
 	} else if v.State != app.SignedOut {
@@ -491,8 +572,18 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 				u.A.Close(s.card.Key)
 			}
 		case hitRead:
-			u.A.Read(u.Ctx, s.card.Key)
-		case hitOpen, hitBody:
+			if s.card.Key == app.UpdateKey {
+				go func() { _ = u.A.Update(u.Ctx) }()
+			} else {
+				u.A.Read(u.Ctx, s.card.Key)
+			}
+		case hitOpen:
+			if s.card.Key == app.UpdateKey {
+				u.A.Close(s.card.Key) // «Позже»
+			} else if s.kind == "card" {
+				u.A.Open(s.card.Key)
+			}
+		case hitBody:
 			if s.kind == "more" {
 				u.A.OpenCRM()
 			} else if s.kind == "card" {
@@ -638,15 +729,18 @@ func (u *UI) paint(s *slot) {
 			if s.hover == hitOpen {
 				ob = colBtnHov
 			}
+			openLabel, label := "Открыть", "Прочитано"
+			if s.card.Key == app.UpdateKey {
+				openLabel, label = "Позже", "Обновить"
+				if u.A.View().Updating {
+					label = "Обновляю…"
+				}
+			}
 			p.round(open, ob, ob, u.pi(8))
-			p.text("Открыть", open, u.font(13, false), colTitle, dtSingleLine|dtVCenter|dtCenter)
+			p.text(openLabel, open, u.font(13, false), colTitle, dtSingleLine|dtVCenter|dtCenter)
 			rb := colBlue
 			if s.hover == hitRead {
 				rb = colBlueHov
-			}
-			label := "Прочитано"
-			if s.card.Key == app.UpdateKey {
-				label = "Позже"
 			}
 			p.round(read, rb, rb, u.pi(8))
 			p.text(label, read, u.font(13, true), colWhite, dtSingleLine|dtVCenter|dtCenter)

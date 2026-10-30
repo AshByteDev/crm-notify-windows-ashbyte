@@ -85,7 +85,7 @@ func TestAgainstStand(t *testing.T) {
 	me := signIn(t, server, env("NOTIFY_USER", "demo-op1"), password)
 	peer := signIn(t, server, env("NOTIFY_PEER", "demo-op2"), password)
 	var sounds atomic.Int32
-	a := &App{Server: server, Version: "0.0.0-test", Dir: t.TempDir(), Device: "STAND-TEST", P: Platform{
+	a := &App{Version: "0.0.0-test", Dir: t.TempDir(), Device: "STAND-TEST", P: Platform{
 		// the browser of the employee: the page «Подключить» → the code back to the loopback of the app
 		OpenURL: func(raw string) error {
 			u, _ := url.Parse(raw)
@@ -104,10 +104,16 @@ func TestAgainstStand(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a.Start(ctx)
-	if a.View().State != SignedOut {
-		t.Fatal("a new app starts signed out")
+	if a.View().State != NeedServer {
+		t.Fatal("the first start asks the portal")
 	}
-	a.Login(ctx)
+	if err := a.SetServer(ctx, "localhost:1"); err == nil {
+		t.Fatal("no portal there")
+	}
+	// the portal typed as a page of the CRM: cut to the portal, checked, then the sign-in starts by itself
+	if err := a.SetServer(ctx, server+"/team"); err != nil {
+		t.Fatal(err)
+	}
 	waitFor(t, "online", func() bool { return a.View().State == Online })
 	waitFor(t, "the name", func() bool { return a.View().User != "" })
 
@@ -142,7 +148,7 @@ func TestAgainstStand(t *testing.T) {
 	cancel()
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
-	b := &App{Server: server, Version: "0.0.0-test", Dir: a.Dir, Device: "STAND-TEST", P: a.P}
+	b := &App{Version: "0.0.0-test", Dir: a.Dir, Device: "STAND-TEST", P: a.P}
 	b.Start(ctx2)
 	waitFor(t, "online after restart", func() bool { return b.View().State == Online })
 

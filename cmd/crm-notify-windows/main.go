@@ -12,24 +12,35 @@ import (
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/platform"
 )
 
-// Set at build time (Makefile): -X main.version=… -X main.server=… -X main.updateURL=…
+// Set at build time (Makefile): -X main.version=… -X main.server=… (only prefills the address of the portal)
 var (
-	version   = "dev"
-	server    = "http://localhost:8780"
-	updateURL = ""
+	version = "dev"
+	server  = ""
+	repo    = "AshByteDev/crm-notify-windows-ashbyte" // releases with updates
 )
 
 // newApp builds the client from the flags and the build settings.
 func newApp() (*app.App, error) {
-	srv := flag.String("server", server, "адрес AshCRM (по умолчанию — встроенный при сборке)")
+	srv := flag.String("server", "", "адрес портала AshCRM (вместо сохранённого)")
 	_ = flag.Bool("autostart", false, "запущено вместе с Windows")
+	_ = flag.Bool("updated", false, "запущено после обновления")
 	flag.Parse()
+	platform.CleanupOld()
 	dir, err := platform.Dir()
 	if err != nil {
 		return nil, err
 	}
-	return &app.App{Server: *srv, Version: version, UpdateURL: updateURL, Dir: dir, Device: app.DeviceName(), Log: logger(dir),
-		P: app.Platform{OpenURL: platform.OpenURL, PlaySound: platform.PlaySound, Autostart: platform.Autostart, SetAutostart: platform.SetAutostart},
+	if *srv != "" { // an explicit portal (development, a support case) replaces the saved one
+		cfg := platform.LoadConfig(dir)
+		if s, err := app.NormalizeServer(*srv); err == nil && s != cfg.Server {
+			cfg.Server = s
+			_ = platform.SaveConfig(dir, cfg)
+			platform.DeleteSecret(dir)
+		}
+	}
+	return &app.App{DefaultServer: server, Version: version, Repo: repo, Dir: dir, Device: app.DeviceName(), Log: logger(dir),
+		P: app.Platform{OpenURL: platform.OpenURL, PlaySound: platform.PlaySound, Autostart: platform.Autostart,
+			SetAutostart: platform.SetAutostart, Replace: platform.Replace},
 	}, nil
 }
 

@@ -50,6 +50,15 @@ var (
 	pDestroyIcon                   = user32.NewProc("DestroyIcon")
 	pTrackMouseEvent               = user32.NewProc("TrackMouseEvent")
 	pMessageBoxW                   = user32.NewProc("MessageBoxW")
+	pIsDialogMessageW              = user32.NewProc("IsDialogMessageW")
+	pSendMessageW                  = user32.NewProc("SendMessageW")
+	pGetWindowTextW                = user32.NewProc("GetWindowTextW")
+	pSetWindowTextW                = user32.NewProc("SetWindowTextW")
+	pEnableWindow                  = user32.NewProc("EnableWindow")
+	pSetFocus                      = user32.NewProc("SetFocus")
+	pGetSystemMetrics              = user32.NewProc("GetSystemMetrics")
+	pAdjustWindowRectEx            = user32.NewProc("AdjustWindowRectEx")
+	pGetSysColorBrush              = user32.NewProc("GetSysColorBrush")
 
 	pCreateSolidBrush       = gdi32.NewProc("CreateSolidBrush")
 	pCreatePen              = gdi32.NewProc("CreatePen")
@@ -69,6 +78,7 @@ var (
 
 	pGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
 	pCreateMutexW     = kernel32.NewProc("CreateMutexW")
+	pCloseHandle      = kernel32.NewProc("CloseHandle")
 )
 
 const (
@@ -86,6 +96,27 @@ const (
 	wmRefresh        = wmApp + 2
 
 	pbtResumeAutomatic = 0x0012
+
+	wmCommand        = 0x0111
+	wmSetFont        = 0x0030
+	wmCtlColorStatic = 0x0138
+	wmPortalDone     = wmApp + 3
+	wsOverlapped     = 0x00000000
+	wsCaption        = 0x00C00000
+	wsSysMenu        = 0x00080000
+	wsChild          = 0x40000000
+	wsVisible        = 0x10000000
+	wsBorder         = 0x00800000
+	wsTabStop        = 0x00010000
+	wsExClientEdge   = 0x00000200
+	esAutoHScroll    = 0x0080
+	bsDefPushButton  = 0x0001
+	swShow           = 5
+	smCxScreen       = 0
+	smCyScreen       = 1
+	colorWindow      = 5
+	idOK             = 1
+	emSetSel         = 0x00B1
 
 	wsPopup         = 0x80000000
 	wsExTopmost     = 0x00000008

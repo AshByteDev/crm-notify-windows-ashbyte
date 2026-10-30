@@ -1,9 +1,9 @@
 # AshCRM Notify for Windows. The release is built on any OS (pure Go, no cgo):
-#   make build SERVER=https://crm.example.ru [UPDATE_URL=https://crm.example.ru/downloads/notify/latest.json]
+#   make build [SERVER=https://crm.example.ru — only prefills the address of the portal]
 VERSION    := $(shell cat VERSION)
-SERVER     ?= http://localhost:8780
-UPDATE_URL ?=
-LDFLAGS    := -s -w -H windowsgui -X main.version=$(VERSION) -X main.server=$(SERVER) -X main.updateURL=$(UPDATE_URL)
+SERVER     ?=
+
+LDFLAGS    := -s -w -H windowsgui -X main.version=$(VERSION) -X main.server=$(SERVER)
 
 .PHONY: build test vet run stand-test version
 
@@ -25,4 +25,4 @@ run: ## console mode against a CRM (development; prints the cards)
 	go run ./cmd/crm-notify-windows -server $(SERVER)
 
 stand-test: ## the whole client against a running CRM: make stand-test SERVER=http://localhost:8780 PASSWORD=…
-	NOTIFY_SERVER=$(SERVER) NOTIFY_PASSWORD="$(PASSWORD)" go test -race -count=1 -tags stand -run TestAgainstStand -v ./internal/app/
+	@NOTIFY_SERVER=$(SERVER) NOTIFY_PASSWORD="$(PASSWORD)" go test -race -count=1 -tags stand -run TestAgainstStand -v ./internal/app/

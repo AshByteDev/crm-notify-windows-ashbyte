@@ -5,13 +5,9 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +21,7 @@ import (
 
 // States of the app (the tray icon and its tooltip).
 const (
+	NeedServer = "need_server" // the first start: the address of the portal is asked
 	SignedOut  = "signed_out"
 	SigningIn  = "signing_in"
 	Connecting = stream.StateConnecting
@@ -44,19 +41,26 @@ type Platform struct {
 	PlaySound    func(class string)
 	Autostart    func() bool
 	SetAutostart func(bool) error
+	// Replace puts the downloaded file in place of the running one and starts it (nil — not supported here).
+	Replace func(running, downloaded string) error
 }
 
 // App is the whole client.
 type App struct {
-	Server    string
-	Version   string
-	UpdateURL string // JSON {"version": "0.1.2", "url": "https://…"}; empty — no update checks
-	Dir       string // settings and the protected session
-	Device    string // the computer name shown in «Мои устройства»
-	P         Platform
-	Log       *slog.Logger
+	// Server is the portal of the CRM: asked on the first start and kept in config.json (DefaultServer prefills it).
+	Server        string
+	DefaultServer string
+	Version       string
+	// Repo of the releases on GitHub ("owner/name"); empty — no update checks.
+	Repo   string
+	Dir    string // settings and the protected session
+	Device string // the computer name shown in «Мои устройства»
+	P      Platform
+	Log    *slog.Logger
 	// Changed asks the UI to redraw (called from any goroutine).
 	Changed func()
+	// Quit closes the app (after an update the new copy starts).
+	Quit func()
 
 	Q   *queue.Manager
 	api *api.Client
@@ -73,20 +77,27 @@ type App struct {
 	stop      context.CancelFunc
 	lastSound time.Time
 	refreshMu sync.Mutex
+	update    *Release
+	updating  bool
 }
 
 // View is what the tray and the cards show.
 type View struct {
-	State        string
-	User         string
-	Error        string
-	Queue        queue.View
-	DND          bool
-	CheckUpdates bool
-	Autostart    bool
-	Version      string
-	Server       string
+	State         string
+	DefaultServer string
+	Update        *Release // a newer version on GitHub
+	Updating      bool
+	User          string
+	Error         string
+	Queue         queue.View
+	DND           bool
+	CheckUpdates  bool
+	Autostart     bool
+	Version       string
+	Server        string
 }
+
+func (a *App) userAgent() string { return "AshCRM-Notify/" + a.Version + " (Windows)" }
 
 func (a *App) log() *slog.Logger {
 	if a.Log != nil {
@@ -104,16 +115,17 @@ func (a *App) changed() {
 // Start loads the settings and connects when a session is saved.
 func (a *App) Start(ctx context.Context) {
 	a.cfg = platform.LoadConfig(a.Dir)
-	if a.cfg.Server != "" {
-		a.Server = a.cfg.Server
-	}
-	a.api = api.New(a.Server, "AshCRM-Notify/"+a.Version+" (Windows)")
+	a.Server = a.cfg.Server
 	a.Q = queue.New()
 	a.Q.SetDND(a.cfg.DND)
-	a.state = SignedOut
-	if s, ok := platform.LoadSecret(a.Dir); ok {
-		a.secret = s
-		a.connect(ctx)
+	a.state = NeedServer
+	if a.Server != "" {
+		a.api = api.New(a.Server, a.userAgent())
+		a.state = SignedOut
+		if s, ok := platform.LoadSecret(a.Dir); ok {
+			a.secret = s
+			a.connect(ctx)
+		}
 	}
 	go a.updates(ctx)
 	a.changed()
@@ -124,7 +136,7 @@ func (a *App) View() View {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	v := View{State: a.state, User: a.user, Error: a.lastError, DND: a.cfg.DND, CheckUpdates: a.cfg.CheckUpdates,
-		Version: a.Version, Server: a.Server}
+		Version: a.Version, Server: a.Server, DefaultServer: a.DefaultServer, Update: a.update, Updating: a.updating}
 	if a.Q != nil {
 		v.Queue = a.Q.View()
 	}
@@ -392,77 +404,6 @@ func (h handler) State(s string) {
 		return // signedOut() is called when Run returns
 	}
 	h.a.setState(s, "")
-}
-
-// ---- updates ----
-
-type release struct {
-	Version string `json:"version"`
-	URL     string `json:"url"`
-	Notes   string `json:"notes"`
-}
-
-// newer compares versions "X.Y.Z".
-func newer(v, than string) bool {
-	parse := func(s string) [3]int {
-		var out [3]int
-		for i, p := range strings.SplitN(strings.TrimPrefix(s, "v"), ".", 3) {
-			out[i], _ = strconv.Atoi(p)
-		}
-		return out
-	}
-	a, b := parse(v), parse(than)
-	for i := range a {
-		if a[i] != b[i] {
-			return a[i] > b[i]
-		}
-	}
-	return false
-}
-
-// updates checks the new version once a day (switched off in the menu or without UpdateURL) and shows a card.
-func (a *App) updates(ctx context.Context) {
-	if a.UpdateURL == "" {
-		return
-	}
-	for {
-		a.mu.Lock()
-		on := a.cfg.CheckUpdates
-		a.mu.Unlock()
-		if on {
-			if r, err := a.checkUpdate(ctx); err == nil && newer(r.Version, a.Version) {
-				a.Q.Card(api.Card{Key: UpdateKey, Kind: "update", Title: "Доступна версия " + r.Version, Body: r.Notes,
-					URL: r.URL, At: time.Now(), Sound: api.SoundOther})
-				a.changed()
-			} else if err != nil {
-				a.log().Info("update check", "err", err)
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(24 * time.Hour):
-		}
-	}
-}
-
-func (a *App) checkUpdate(ctx context.Context) (release, error) {
-	var r release
-	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(cctx, "GET", a.UpdateURL, nil)
-	if err != nil {
-		return r, err
-	}
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return r, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return r, fmt.Errorf("HTTP %d", res.StatusCode)
-	}
-	return r, json.NewDecoder(res.Body).Decode(&r)
 }
 
 // DeviceName is the name of the computer for «Мои устройства».

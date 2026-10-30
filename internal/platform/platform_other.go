@@ -30,3 +30,9 @@ func SetAutostart(bool) error { return nil }
 
 // PlaySound plays a sound class.
 func PlaySound(class string) { fmt.Fprint(os.Stderr, "\a") }
+
+// Replace is not supported outside Windows (nil in app.Platform).
+var Replace func(running, downloaded string) error
+
+// CleanupOld does nothing outside Windows.
+func CleanupOld() {}

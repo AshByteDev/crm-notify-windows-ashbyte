@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
 )
 
 func main() {
@@ -44,10 +46,19 @@ func main() {
 		}
 	}
 	a.Start(ctx)
-	if a.View().State == "signed_out" {
+	in := bufio.NewScanner(os.Stdin)
+	for a.View().State == app.NeedServer {
+		fmt.Print("Адрес портала AshCRM: ")
+		if !in.Scan() {
+			return
+		}
+		if err := a.SetServer(ctx, in.Text()); err != nil {
+			fmt.Println(err)
+		}
+	}
+	if a.View().State == app.SignedOut {
 		a.Login(ctx)
 	}
-	in := bufio.NewScanner(os.Stdin)
 	for in.Scan() {
 		f := strings.Fields(in.Text())
 		switch {
