@@ -1,0 +1,659 @@
+//go:build windows
+
+// Package winui is the face of the app on Windows: the tray icon with its menu and up to three cards growing from
+// the bottom of the screen up (docs/APP_SPEC.md §3.1, §3.4). It draws with plain Win32/GDI — no runtime to ship.
+package winui
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"unsafe"
+
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/queue"
+)
+
+// Logical sizes (scaled by the DPI of the screen).
+const (
+	cardW   = 360
+	cardH   = 116
+	moreH   = 30
+	gap     = 8
+	margin  = 12
+	radius  = 14
+	slotMax = queue.Max + 1 // three cards and the «ещё N» strip
+)
+
+// menu commands
+const (
+	cmdLogin = iota + 1
+	cmdLogout
+	cmdOpenCRM
+	cmdDND
+	cmdAutostart
+	cmdUpdates
+	cmdQuit
+)
+
+// what a click hits on a card
+const (
+	hitNone = iota
+	hitBody
+	hitOpen
+	hitRead
+	hitClose
+	hitLogin
+)
+
+// slot is one window of the stack: a card, the «sign in» card or the «ещё N» strip.
+type slot struct {
+	hwnd  uintptr
+	card  api.Card
+	kind  string // card | signin | more
+	text  string // the strip / the error of the sign-in card
+	hover int
+	shown bool
+}
+
+// UI owns every window; all of it runs on one locked OS thread (the Win32 rule).
+type UI struct {
+	A   *app.App
+	Ctx context.Context
+
+	inst      uintptr
+	tray      uintptr
+	trayReady atomic.Uintptr // the tray window for Notify (set once it exists)
+	trayMsg   uint32         // TaskbarCreated: Explorer restarted, the icon must be added again
+	scale     float64
+	icons     map[string]uintptr
+	iconKey   string
+	slots     [slotMax]*slot
+	byHwnd    map[uintptr]*slot
+	fonts     map[string]uintptr
+	signinOK  bool // the person closed the «sign in» card
+}
+
+// AlreadyRunning holds a named mutex for the session of the user: a second start just exits.
+func AlreadyRunning() bool {
+	_, _, err := pCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(utf16(`Local\AshCRMNotify`))))
+	return err == syscall.Errno(errAlreadyExis)
+}
+
+// Message shows a message box (errors before the tray exists).
+func Message(text string) {
+	pMessageBoxW.Call(0, uintptr(unsafe.Pointer(utf16(text))), uintptr(unsafe.Pointer(utf16("AshCRM Notify"))), 0x40)
+}
+
+// Notify asks the UI thread to redraw (app.App.Changed; safe from any goroutine, before the windows exist too).
+func (u *UI) Notify() {
+	if h := u.trayReady.Load(); h != 0 {
+		pPostMessageW.Call(h, wmRefresh, 0, 0)
+	}
+}
+
+// Run creates the tray and the cards and runs the message loop until «Выход».
+func (u *UI) Run() error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	// sharp text on scaled screens; the calls are missing on old Windows 10 builds — then the old way
+	if pSetProcessDpiAwarenessContext.Find() == nil {
+		pSetProcessDpiAwarenessContext.Call(^uintptr(3)) // PER_MONITOR_AWARE_V2 (-4)
+	} else {
+		pSetProcessDPIAware.Call()
+	}
+	u.scale = 1
+	if pGetDpiForSystem.Find() == nil {
+		if dpi, _, _ := pGetDpiForSystem.Call(); dpi != 0 {
+			u.scale = float64(dpi) / 96
+		}
+	}
+	u.inst, _, _ = pGetModuleHandleW.Call(0)
+	u.icons, u.fonts, u.byHwnd = map[string]uintptr{}, map[string]uintptr{}, map[uintptr]*slot{}
+
+	hand, _, _ := pLoadCursorW.Call(0, idcHand)
+	arrow, _, _ := pLoadCursorW.Call(0, idcArrow)
+	trayClass := wndClassEx{Style: 0, WndProc: syscall.NewCallback(u.trayProc), Instance: u.inst, Cursor: arrow,
+		ClassName: utf16("AshCRMNotifyTray")}
+	trayClass.Size = uint32(unsafe.Sizeof(trayClass))
+	if r, _, err := pRegisterClassExW.Call(ptr(&trayClass)); r == 0 {
+		return fmt.Errorf("register tray class: %w", err)
+	}
+	cardClass := wndClassEx{Style: csDropShadow, WndProc: syscall.NewCallback(u.cardProc), Instance: u.inst, Cursor: hand,
+		ClassName: utf16("AshCRMNotifyCard")}
+	cardClass.Size = uint32(unsafe.Sizeof(cardClass))
+	if r, _, err := pRegisterClassExW.Call(ptr(&cardClass)); r == 0 {
+		return fmt.Errorf("register card class: %w", err)
+	}
+	u.tray, _, _ = pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(trayClass.ClassName)), 0, 0, 0, 0, 0, 0, 0, 0, u.inst, 0)
+	if u.tray == 0 {
+		return fmt.Errorf("create tray window")
+	}
+	tm, _, _ := pRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(utf16("TaskbarCreated"))))
+	u.trayMsg = uint32(tm)
+	for i := range u.slots {
+		h, _, _ := pCreateWindowExW.Call(wsExTopmost|wsExToolWindow|wsExNoActivate, uintptr(unsafe.Pointer(cardClass.ClassName)),
+			0, wsPopup, 0, 0, u.px(cardW), u.px(cardH), 0, 0, u.inst, 0)
+		s := &slot{hwnd: h}
+		u.slots[i] = s
+		u.byHwnd[h] = s
+	}
+	u.addTray()
+	u.trayReady.Store(u.tray)
+	u.refresh()
+
+	var m msg
+	for {
+		r, _, _ := pGetMessageW.Call(ptr(&m), 0, 0, 0)
+		if int32(r) <= 0 {
+			break
+		}
+		pTranslateMessage.Call(ptr(&m))
+		pDispatchMessageW.Call(ptr(&m))
+	}
+	u.removeTray()
+	return nil
+}
+
+func (u *UI) px(v int) uintptr { return uintptr(float64(v)*u.scale + 0.5) }
+func (u *UI) pi(v int) int32   { return int32(float64(v)*u.scale + 0.5) }
+
+// ---- tray ----
+
+func (u *UI) iconFor(v app.View) (string, uintptr) {
+	key := "off"
+	switch {
+	case v.State != app.Online:
+	case v.DND:
+		key = "dnd"
+	default:
+		key = "on"
+	}
+	if len(v.Queue.Visible)+v.Queue.Waiting > 0 {
+		key += "-dot"
+	}
+	if h, ok := u.icons[key]; ok {
+		return key, h
+	}
+	bg := ColorOffline
+	if strings.HasPrefix(key, "on") {
+		bg = ColorOnline
+	} else if strings.HasPrefix(key, "dnd") {
+		bg = ColorDND
+	}
+	size := int(16*u.scale + 0.5)
+	if size < 16 {
+		size = 16
+	}
+	png := IconPNG(size*2, bg, strings.HasSuffix(key, "-dot"))
+	h, _, _ := pCreateIconFromResourceEx.Call(uintptr(unsafe.Pointer(&png[0])), uintptr(len(png)), 1, 0x00030000,
+		uintptr(size), uintptr(size), 0)
+	u.icons[key] = h
+	return key, h
+}
+
+func tipOf(v app.View) string {
+	s := "AshCRM — "
+	switch v.State {
+	case app.Online:
+		s += "подключено"
+		if v.DND {
+			s += ", не беспокоить"
+		}
+	case app.Connecting:
+		s += "подключение…"
+	case app.Offline:
+		s += "нет связи, переподключаюсь"
+	case app.SigningIn:
+		s += "вход в браузере…"
+	default:
+		s += "войдите в приложение"
+	}
+	if n := len(v.Queue.Visible) + v.Queue.Waiting; n > 0 {
+		s += fmt.Sprintf(" · уведомлений: %d", n)
+	}
+	return s
+}
+
+func (u *UI) trayData(v app.View) notifyIconData {
+	key, icon := u.iconFor(v)
+	u.iconKey = key
+	d := notifyIconData{Wnd: u.tray, ID: 1, Flags: nifMessage | nifIcon | nifTip, CallbackMessage: wmTray, Icon: icon}
+	d.Size = uint32(unsafe.Sizeof(d))
+	tip, _ := syscall.UTF16FromString(tipOf(v))
+	copy(d.Tip[:len(d.Tip)-1], tip)
+	return d
+}
+
+func (u *UI) addTray() {
+	d := u.trayData(u.A.View())
+	pShellNotifyIconW.Call(nimAdd, ptr(&d))
+}
+
+func (u *UI) removeTray() {
+	d := notifyIconData{Wnd: u.tray, ID: 1}
+	d.Size = uint32(unsafe.Sizeof(d))
+	pShellNotifyIconW.Call(nimDelete, ptr(&d))
+}
+
+func (u *UI) trayProc(hwnd, m, wp, lp uintptr) uintptr {
+	switch uint32(m) {
+	case wmTray:
+		switch uint32(lp) {
+		case wmLButtonUp:
+			v := u.A.View()
+			if v.State == app.SignedOut {
+				u.A.Login(u.Ctx)
+			} else {
+				u.signinOK = false
+				u.A.OpenCRM()
+			}
+		case wmRButtonUp:
+			u.menu()
+		}
+		return 0
+	case wmRefresh:
+		u.refresh()
+		return 0
+	case wmPowerBroadcast:
+		if wp == pbtResumeAutomatic {
+			u.A.Reconnect()
+		}
+		return 1
+	case wmDestroy:
+		pPostQuitMessage.Call(0)
+		return 0
+	}
+	if u.trayMsg != 0 && uint32(m) == u.trayMsg {
+		u.addTray()
+		return 0
+	}
+	r, _, _ := pDefWindowProcW.Call(hwnd, m, wp, lp)
+	return r
+}
+
+func (u *UI) menu() {
+	v := u.A.View()
+	h, _, _ := pCreatePopupMenu.Call()
+	defer pDestroyMenu.Call(h)
+	add := func(id int, text string, flags uintptr) {
+		pAppendMenuW.Call(h, flags, uintptr(id), uintptr(unsafe.Pointer(utf16(text))))
+	}
+	sep := func() { pAppendMenuW.Call(h, mfSeparator, 0, 0) }
+	check := func(on bool) uintptr {
+		if on {
+			return mfChecked
+		}
+		return 0
+	}
+	status := tipOf(v)
+	if v.User != "" {
+		status = v.User + " · " + strings.TrimPrefix(status, "AshCRM — ")
+	}
+	add(0, status, mfGrayed)
+	if v.Error != "" {
+		add(0, v.Error, mfGrayed)
+	}
+	sep()
+	if v.State == app.SignedOut {
+		add(cmdLogin, "Войти…", mfString)
+	} else {
+		add(cmdOpenCRM, "Открыть AshCRM", mfString)
+	}
+	add(cmdDND, "Не беспокоить", check(v.DND))
+	sep()
+	add(cmdAutostart, "Запускать вместе с Windows", check(v.Autostart))
+	add(cmdUpdates, "Проверять обновления", check(v.CheckUpdates))
+	if v.State != app.SignedOut && v.State != app.SigningIn {
+		add(cmdLogout, "Выйти из аккаунта", mfString)
+	}
+	sep()
+	add(0, "Версия "+v.Version, mfGrayed)
+	add(cmdQuit, "Закрыть приложение", mfString)
+
+	var p point
+	pGetCursorPos.Call(ptr(&p))
+	pSetForegroundWindow.Call(u.tray) // else the menu does not close on a click outside
+	cmd, _, _ := pTrackPopupMenu.Call(h, tpmRightButton|tpmReturnCmd|tpmBottomAlign, uintptr(p.X), uintptr(p.Y), 0, u.tray, 0)
+	pPostMessageW.Call(u.tray, wmNull, 0, 0)
+	switch int(cmd) {
+	case cmdLogin:
+		u.A.Login(u.Ctx)
+	case cmdLogout:
+		go u.A.Logout(u.Ctx)
+	case cmdOpenCRM:
+		u.A.OpenCRM()
+	case cmdDND:
+		u.A.SetDND(!v.DND)
+	case cmdAutostart:
+		u.A.SetAutostart(!v.Autostart)
+	case cmdUpdates:
+		u.A.SetCheckUpdates(!v.CheckUpdates)
+	case cmdQuit:
+		pDestroyWindow.Call(u.tray)
+	}
+}
+
+// ---- the stack of cards ----
+
+// refresh redraws the tray and puts the cards in their places (the newest at the bottom).
+func (u *UI) refresh() {
+	v := u.A.View()
+	d := u.trayData(v)
+	pShellNotifyIconW.Call(nimModify, ptr(&d))
+	type want struct {
+		kind, text string
+		card       api.Card
+	}
+	var list []want
+	if v.State == app.SignedOut && !u.signinOK {
+		list = append(list, want{kind: "signin", text: v.Error})
+	} else if v.State != app.SignedOut {
+		u.signinOK = false
+	}
+	for _, c := range v.Queue.Visible {
+		list = append(list, want{kind: "card", card: c})
+	}
+	if n := v.Queue.Waiting + v.Queue.More; n > 0 && len(v.Queue.Visible) > 0 {
+		t := fmt.Sprintf("Ещё %d %s", n, plural(n, "уведомление", "уведомления", "уведомлений"))
+		if v.Queue.DND {
+			t += " · не беспокоить"
+		}
+		list = append(list, want{kind: "more", text: t + " — открыть AshCRM"})
+	} else if v.Queue.DND && v.Queue.Waiting > 0 {
+		list = append(list, want{kind: "more", text: fmt.Sprintf("Не беспокоить · ждут %d", v.Queue.Waiting)})
+	}
+
+	var wa rect
+	pSystemParametersInfoW.Call(spiGetWorkArea, 0, ptr(&wa), 0)
+	x := wa.Right - u.pi(margin) - u.pi(cardW)
+	y := wa.Bottom - u.pi(margin)
+	for i, s := range u.slots {
+		if i >= len(list) {
+			if s.shown {
+				pShowWindow.Call(s.hwnd, swHide)
+				s.shown = false
+			}
+			continue
+		}
+		w := list[i]
+		h := u.pi(cardH)
+		if w.kind == "more" {
+			h = u.pi(moreH)
+		}
+		y -= h
+		changed := s.kind != w.kind || s.text != w.text || s.card != w.card
+		s.kind, s.text, s.card = w.kind, w.text, w.card
+		pSetWindowPos.Call(s.hwnd, hwndTopmost, uintptr(x), uintptr(y), uintptr(u.pi(cardW)), uintptr(h), swpNoActivate|swpShowWindow)
+		rgn, _, _ := pCreateRoundRectRgn.Call(0, 0, uintptr(u.pi(cardW)+1), uintptr(h+1), uintptr(u.pi(radius)), uintptr(u.pi(radius)))
+		pSetWindowRgn.Call(s.hwnd, rgn, 1)
+		if !s.shown {
+			pShowWindow.Call(s.hwnd, swShowNoActive)
+			s.shown = true
+		}
+		if changed {
+			pInvalidateRect.Call(s.hwnd, 0, 0)
+		}
+		y -= u.pi(gap)
+	}
+}
+
+func plural(n int, one, few, many string) string {
+	n %= 100
+	if n >= 11 && n <= 14 {
+		return many
+	}
+	switch n % 10 {
+	case 1:
+		return one
+	case 2, 3, 4:
+		return few
+	}
+	return many
+}
+
+// geometry of a card (client coordinates)
+func (u *UI) buttons(s *slot) (open, read, close rect) {
+	w, h := u.pi(cardW), u.pi(cardH)
+	bh, bw := u.pi(26), u.pi(96)
+	read = rect{w - u.pi(14) - bw, h - u.pi(12) - bh, w - u.pi(14), h - u.pi(12)}
+	open = rect{read.Left - u.pi(8) - bw, read.Top, read.Left - u.pi(8), read.Bottom}
+	close = rect{w - u.pi(30), u.pi(8), w - u.pi(8), u.pi(30)}
+	if s.kind == "signin" {
+		read.Left, open = read.Right-u.pi(120), rect{}
+	}
+	return
+}
+
+func in(r rect, x, y int32) bool { return x >= r.Left && x < r.Right && y >= r.Top && y < r.Bottom }
+
+func (u *UI) hit(s *slot, x, y int32) int {
+	if s.kind == "more" {
+		return hitBody
+	}
+	open, read, cl := u.buttons(s)
+	switch {
+	case in(cl, x, y):
+		return hitClose
+	case in(read, x, y) && s.kind == "signin":
+		return hitLogin
+	case in(read, x, y):
+		return hitRead
+	case in(open, x, y):
+		return hitOpen
+	}
+	if s.kind == "signin" {
+		return hitLogin
+	}
+	return hitBody
+}
+
+func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
+	s := u.byHwnd[hwnd]
+	switch uint32(m) {
+	case wmPaint:
+		if s != nil {
+			u.paint(s)
+			return 0
+		}
+	case wmMouseMove:
+		if s != nil {
+			h := u.hit(s, loword(lp), hiword(lp))
+			if h != s.hover {
+				s.hover = h
+				pInvalidateRect.Call(hwnd, 0, 0)
+			}
+			t := trackMouseEvent{Flags: tmeLeave, Track: hwnd}
+			t.Size = uint32(unsafe.Sizeof(t))
+			pTrackMouseEvent.Call(ptr(&t))
+		}
+		return 0
+	case wmMouseLeave:
+		if s != nil && s.hover != hitNone {
+			s.hover = hitNone
+			pInvalidateRect.Call(hwnd, 0, 0)
+		}
+		return 0
+	case wmLButtonUp:
+		if s == nil {
+			return 0
+		}
+		switch u.hit(s, loword(lp), hiword(lp)) {
+		case hitClose:
+			if s.kind == "signin" {
+				u.signinOK = true
+				u.refresh()
+			} else if s.kind == "card" {
+				u.A.Close(s.card.Key)
+			}
+		case hitRead:
+			u.A.Read(u.Ctx, s.card.Key)
+		case hitOpen, hitBody:
+			if s.kind == "more" {
+				u.A.OpenCRM()
+			} else if s.kind == "card" {
+				u.A.Open(s.card.Key)
+			}
+		case hitLogin:
+			u.A.Login(u.Ctx)
+		}
+		return 0
+	case wmClose:
+		return 0 // Alt+F4 on a card does nothing: the card stays until an action
+	}
+	r, _, _ := pDefWindowProcW.Call(hwnd, m, wp, lp)
+	return r
+}
+
+// ---- painting ----
+
+var (
+	colBg      = rgb(0xFF, 0xFF, 0xFF)
+	colBorder  = rgb(0xDD, 0xE3, 0xEA)
+	colTitle   = rgb(0x14, 0x18, 0x1D)
+	colBody    = rgb(0x45, 0x4C, 0x55)
+	colMuted   = rgb(0x8A, 0x93, 0x9E)
+	colBlue    = rgb(0x33, 0x90, 0xEC)
+	colGreen   = rgb(0x2E, 0xAD, 0x5B)
+	colOrange  = rgb(0xF0, 0x9A, 0x1A)
+	colBtn     = rgb(0xEE, 0xF1, 0xF5)
+	colBtnHov  = rgb(0xE1, 0xE6, 0xEC)
+	colBlueHov = rgb(0x24, 0x7C, 0xD6)
+	colMoreBg  = rgb(0x2B, 0x31, 0x38)
+	colWhite   = rgb(0xFF, 0xFF, 0xFF)
+)
+
+func (u *UI) font(size int, bold bool) uintptr {
+	key := fmt.Sprint(size, bold)
+	if f, ok := u.fonts[key]; ok {
+		return f
+	}
+	weight := 400
+	if bold {
+		weight = 600
+	}
+	f, _, _ := pCreateFontW.Call(uintptr(-u.pi(size)), 0, 0, 0, uintptr(weight), 0, 0, 0, 1, 0, 0, 5, 0,
+		uintptr(unsafe.Pointer(utf16("Segoe UI"))))
+	u.fonts[key] = f
+	return f
+}
+
+type painter struct {
+	u  *UI
+	dc uintptr
+}
+
+func (p painter) fill(r rect, color uintptr) {
+	b, _, _ := pCreateSolidBrush.Call(color)
+	pFillRect.Call(p.dc, ptr(&r), b)
+	pDeleteObject.Call(b)
+}
+
+func (p painter) round(r rect, fill, border uintptr, rad int32) {
+	b, _, _ := pCreateSolidBrush.Call(fill)
+	pen, _, _ := pCreatePen.Call(psSolid, 1, border)
+	ob, _, _ := pSelectObject.Call(p.dc, b)
+	op, _, _ := pSelectObject.Call(p.dc, pen)
+	pRoundRect.Call(p.dc, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right), uintptr(r.Bottom), uintptr(rad), uintptr(rad))
+	pSelectObject.Call(p.dc, ob)
+	pSelectObject.Call(p.dc, op)
+	pDeleteObject.Call(b)
+	pDeleteObject.Call(pen)
+}
+
+func (p painter) text(s string, r rect, font, color uintptr, flags uintptr) {
+	if s == "" {
+		return
+	}
+	pSelectObject.Call(p.dc, font)
+	pSetTextColor.Call(p.dc, color)
+	pDrawTextW.Call(p.dc, uintptr(unsafe.Pointer(utf16(s))), ^uintptr(0), ptr(&r), flags|dtNoPrefix)
+}
+
+func accent(c api.Card) uintptr {
+	switch {
+	case c.Mention:
+		return colOrange
+	case c.Sound == api.SoundClient:
+		return colGreen
+	}
+	return colBlue
+}
+
+func (u *UI) paint(s *slot) {
+	var ps paintStruct
+	hdc, _, _ := pBeginPaint.Call(s.hwnd, ptr(&ps))
+	defer pEndPaint.Call(s.hwnd, ptr(&ps))
+	var cr rect
+	pGetClientRect.Call(s.hwnd, ptr(&cr))
+	w, h := cr.Right, cr.Bottom
+	mem, _, _ := pCreateCompatibleDC.Call(hdc)
+	bmp, _, _ := pCreateCompatibleBitmap.Call(hdc, uintptr(w), uintptr(h))
+	old, _, _ := pSelectObject.Call(mem, bmp)
+	pSetBkMode.Call(mem, transparentMode)
+	p := painter{u: u, dc: mem}
+
+	if s.kind == "more" {
+		p.fill(cr, colMoreBg)
+		p.text(s.text, rect{u.pi(14), 0, w - u.pi(14), h}, u.font(12, false), colWhite, dtSingleLine|dtVCenter|dtEndEllipsis|dtCenter)
+	} else {
+		p.round(rect{0, 0, w, h}, colBg, colBorder, u.pi(radius))
+		bar := accent(s.card)
+		title, body := s.card.Title, s.card.Body
+		if s.kind == "signin" {
+			bar, title, body = colBlue, "AshCRM Notify", "Войдите, чтобы получать уведомления о сообщениях и беседах."
+			if s.text != "" {
+				body = s.text
+			}
+		}
+		p.fill(rect{0, u.pi(10), u.pi(4), h - u.pi(10)}, bar)
+		left := u.pi(18)
+		p.text(title, rect{left, u.pi(12), w - u.pi(38), u.pi(34)}, u.font(14, true), colTitle, dtSingleLine|dtEndEllipsis)
+		p.text(body, rect{left, u.pi(36), w - u.pi(16), u.pi(74)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
+		open, read, cl := u.buttons(s)
+		// ×
+		xc := colMuted
+		if s.hover == hitClose {
+			p.round(cl, colBtnHov, colBtnHov, u.pi(8))
+			xc = colTitle
+		}
+		p.text("✕", cl, u.font(12, false), xc, dtSingleLine|dtVCenter|dtCenter)
+		if s.kind == "signin" {
+			bg := colBlue
+			if s.hover == hitLogin {
+				bg = colBlueHov
+			}
+			p.round(read, bg, bg, u.pi(8))
+			p.text("Войти", read, u.font(13, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
+		} else {
+			if s.card.Count > 1 {
+				p.text(fmt.Sprintf("%d %s", s.card.Count, plural(s.card.Count, "непрочитанное", "непрочитанных", "непрочитанных")),
+					rect{left, open.Top, open.Left - u.pi(6), open.Bottom}, u.font(12, false), colMuted, dtSingleLine|dtVCenter|dtEndEllipsis)
+			}
+			ob := colBtn
+			if s.hover == hitOpen {
+				ob = colBtnHov
+			}
+			p.round(open, ob, ob, u.pi(8))
+			p.text("Открыть", open, u.font(13, false), colTitle, dtSingleLine|dtVCenter|dtCenter)
+			rb := colBlue
+			if s.hover == hitRead {
+				rb = colBlueHov
+			}
+			label := "Прочитано"
+			if s.card.Key == app.UpdateKey {
+				label = "Позже"
+			}
+			p.round(read, rb, rb, u.pi(8))
+			p.text(label, read, u.font(13, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
+		}
+	}
+	pBitBlt.Call(hdc, 0, 0, uintptr(w), uintptr(h), mem, 0, 0, srcCopy)
+	pSelectObject.Call(mem, old)
+	pDeleteObject.Call(bmp)
+	pDeleteDC.Call(mem)
+}

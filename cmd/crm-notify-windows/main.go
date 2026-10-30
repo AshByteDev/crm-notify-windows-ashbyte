@@ -1,7 +1,47 @@
+// AshCRM Notify: notifications of AshCRM in the tray of Windows (docs/APP_SPEC.md).
 package main
 
-import "fmt"
+import (
+	"flag"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
 
-func main() {
-	fmt.Println("AshCRM Notify for Windows: implementation not started")
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/platform"
+)
+
+// Set at build time (Makefile): -X main.version=… -X main.server=… -X main.updateURL=…
+var (
+	version   = "dev"
+	server    = "http://localhost:8780"
+	updateURL = ""
+)
+
+// newApp builds the client from the flags and the build settings.
+func newApp() (*app.App, error) {
+	srv := flag.String("server", server, "адрес AshCRM (по умолчанию — встроенный при сборке)")
+	_ = flag.Bool("autostart", false, "запущено вместе с Windows")
+	flag.Parse()
+	dir, err := platform.Dir()
+	if err != nil {
+		return nil, err
+	}
+	return &app.App{Server: *srv, Version: version, UpdateURL: updateURL, Dir: dir, Device: app.DeviceName(), Log: logger(dir),
+		P: app.Platform{OpenURL: platform.OpenURL, PlaySound: platform.PlaySound, Autostart: platform.Autostart, SetAutostart: platform.SetAutostart},
+	}, nil
+}
+
+// logger writes notify.log next to the settings (no tokens are ever logged); kept under 1 MB.
+func logger(dir string) *slog.Logger {
+	path := filepath.Join(dir, "notify.log")
+	if st, err := os.Stat(path); err == nil && st.Size() > 1<<20 {
+		_ = os.Rename(path, path+".1")
+	}
+	var w io.Writer = io.Discard
+	if f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+		w = f
+	}
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
