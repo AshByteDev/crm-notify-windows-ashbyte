@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -29,7 +30,20 @@ func NormalizeServer(raw string) (string, error) {
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || strings.ContainsAny(u.Host, " \\") {
 		return "", errors.New("неверный адрес портала")
 	}
+	if u.Scheme == "http" && !localHost(u.Hostname()) {
+		// the key of the session would cross the internet in the clear
+		return "", errors.New("нужен https:// — по http можно подключаться только к порталу в локальной сети")
+	}
 	return u.Scheme + "://" + u.Host, nil
+}
+
+// localHost: this computer or a private network (a stand, an office server without a certificate).
+func localHost(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
 }
 
 // probe asks the portal the way the app will: an empty code exchange must be refused by AshCRM with its error.

@@ -118,3 +118,16 @@ func TestDND(t *testing.T) {
 		t.Fatal("reset")
 	}
 }
+
+func TestMemoryIsBounded(t *testing.T) {
+	m := New()
+	for i := 0; i < MaxKept+50; i++ {
+		m.Card(card(fmt.Sprint("k", i), 1, i))
+	}
+	if v := m.View(); len(v.Visible)+v.Waiting != MaxKept {
+		t.Fatalf("kept %d", len(v.Visible)+v.Waiting)
+	}
+	if _, ok := m.Get(fmt.Sprint("k", MaxKept+49)); !ok {
+		t.Fatal("the newest card is kept")
+	}
+}

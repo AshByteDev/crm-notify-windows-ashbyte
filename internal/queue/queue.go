@@ -12,6 +12,9 @@ import (
 // Max is the number of cards on the screen at once (decision of the owner).
 const Max = 3
 
+// MaxKept bounds the memory: beyond it the oldest waiting cards are dropped (they stay unread in the CRM).
+const MaxKept = 500
+
 // View is what the screen shows.
 type View struct {
 	// Visible from the bottom of the screen up: Visible[0] is the lowest (the newest shown).
@@ -73,6 +76,11 @@ func (m *Manager) put(c api.Card) (isNew bool) {
 		i++
 	}
 	m.waiting = append(m.waiting[:i], append([]string{c.Key}, m.waiting[i:]...)...)
+	for len(m.cards) > MaxKept && len(m.waiting) > 0 {
+		old := m.waiting[len(m.waiting)-1]
+		m.waiting = m.waiting[:len(m.waiting)-1]
+		delete(m.cards, old)
+	}
 	return true
 }
 

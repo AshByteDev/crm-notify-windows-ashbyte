@@ -87,6 +87,7 @@ func TestUpdateFromRelease(t *testing.T) {
 	}))
 	defer srv.Close()
 	GitHubAPI = srv.URL
+	downloadPrefix = srv.URL + "/"
 	var replaced string
 	quit := false
 	a := &App{Version: "0.0.3", Repo: "o/r", Dir: t.TempDir(), Quit: func() { quit = true },
@@ -120,5 +121,36 @@ func TestUpdateFromRelease(t *testing.T) {
 	replaced, quit = "", false
 	if err := a.Update(context.Background()); err == nil || replaced != "" || quit {
 		t.Fatalf("bad checksum: %v %q %v", err, replaced, quit)
+	}
+}
+
+func TestSafeLinks(t *testing.T) {
+	var opened []string
+	a := &App{Server: "https://crm.example.ru", Repo: "o/r", P: Platform{OpenURL: func(u string) error { opened = append(opened, u); return nil }}}
+	for _, p := range []string{"/team/1", "https://evil.example/x", "//evil.example", "javascript:alert(1)", "/a\r\nb"} {
+		a.open(p)
+	}
+	want := []string{"https://crm.example.ru/team/1", "https://crm.example.ru/team", "https://crm.example.ru/team", "https://crm.example.ru/team", "https://crm.example.ru/team"}
+	if strings.Join(opened, " ") != strings.Join(want, " ") {
+		t.Fatalf("%v", opened)
+	}
+	opened = nil
+	a.openRelease("https://evil.example/release")
+	a.openRelease("https://github.com/o/r/releases/tag/v1.0.0")
+	if opened[0] != "https://github.com/o/r/releases/latest" || opened[1] != "https://github.com/o/r/releases/tag/v1.0.0" {
+		t.Fatalf("%v", opened)
+	}
+}
+
+func TestPlainHTTPOnlyInsideTheNetwork(t *testing.T) {
+	for _, ok := range []string{"http://localhost:8780", "http://10.27.0.100:8780", "http://192.168.1.5", "http://127.0.0.1"} {
+		if _, err := NormalizeServer(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"http://crm.example.ru", "http://8.8.8.8"} {
+		if _, err := NormalizeServer(bad); err == nil {
+			t.Errorf("%s accepted over plain http", bad)
+		}
 	}
 }

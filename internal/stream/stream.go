@@ -310,8 +310,20 @@ func (s *Stream) read(ctx context.Context, c *websocket.Conn) error {
 	}
 }
 
+// ContractChecker is an optional part of a Handler: the version of the contract the CRM speaks (hello).
+type ContractChecker interface {
+	Contract(version string)
+}
+
 func (s *Stream) dispatch(f frame) {
 	switch f.Type {
+	case "hello":
+		var d struct {
+			Contract string `json:"notify_contract"`
+		}
+		if c, ok := s.H.(ContractChecker); ok && json.Unmarshal(f.Data, &d) == nil {
+			c.Contract(d.Contract)
+		}
 	case "notify.card":
 		var card api.Card
 		if json.Unmarshal(f.Data, &card) == nil && card.Key != "" {

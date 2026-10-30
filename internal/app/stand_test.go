@@ -116,6 +116,9 @@ func TestAgainstStand(t *testing.T) {
 	}
 	waitFor(t, "online", func() bool { return a.View().State == Online })
 	waitFor(t, "the name", func() bool { return a.View().User != "" })
+	if e := a.View().Error; e != "" {
+		t.Fatalf("the CRM and the app must speak one contract: %s", e)
+	}
 
 	// a colleague writes → a card with sound
 	dm := peer.do("POST", "/chats/direct", map[string]any{"user_id": me.id})["id"].(string)

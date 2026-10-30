@@ -24,6 +24,9 @@ const AssetName = "AshCRM-Notify.exe"
 // GitHubAPI is replaceable in tests.
 var GitHubAPI = "https://api.github.com"
 
+// downloadPrefix: a release file is downloaded only from the releases of the repository ("" — github.com/<Repo>).
+var downloadPrefix = ""
+
 // Release is a newer version on GitHub.
 type Release struct {
 	Version string
@@ -115,6 +118,13 @@ func (a *App) latest(ctx context.Context) (*Release, error) {
 	}
 	if r.URL == "" {
 		return nil, errors.New("в релизе нет " + AssetName)
+	}
+	prefix := downloadPrefix
+	if prefix == "" {
+		prefix = "https://github.com/" + a.Repo + "/releases/download/"
+	}
+	if !strings.HasPrefix(r.URL, prefix) {
+		return nil, errors.New("файл релиза не из репозитория приложения")
 	}
 	if r.SHA256 == "" && sumURL != "" {
 		if b, err := a.get(ctx, sumURL, 1024); err == nil {

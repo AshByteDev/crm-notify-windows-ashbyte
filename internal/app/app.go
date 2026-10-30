@@ -29,6 +29,9 @@ const (
 	Offline    = stream.StateOffline
 )
 
+// Contract is the version of docs/NOTIFY_CONTRACT.md the app speaks; a CRM with another major version needs another app.
+const Contract = "1.0"
+
 // UpdateKey is the local card «Доступна новая версия».
 const UpdateKey = "update"
 
@@ -298,12 +301,23 @@ func (a *App) Reconnect() {
 
 // ---- actions of the cards ----
 
+// open opens a page of the portal: the server gives paths only ("/team/…"), so a card can never send the browser to
+// another site (a compromised or fake server included).
 func (a *App) open(path string) {
-	u := path
-	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-		u = strings.TrimRight(a.Server, "/") + path
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsAny(path, "\\\r\n") {
+		path = "/team"
 	}
-	if err := a.P.OpenURL(u); err != nil {
+	if err := a.P.OpenURL(strings.TrimRight(a.Server, "/") + path); err != nil {
+		a.log().Warn("open url", "err", err)
+	}
+}
+
+// openRelease opens the page of a release of the repository of the app.
+func (a *App) openRelease(page string) {
+	if !strings.HasPrefix(page, "https://github.com/"+a.Repo+"/releases/") {
+		page = "https://github.com/" + a.Repo + "/releases/latest"
+	}
+	if err := a.P.OpenURL(page); err != nil {
 		a.log().Warn("open url", "err", err)
 	}
 }
@@ -311,7 +325,11 @@ func (a *App) open(path string) {
 // Open opens the place of the card in the CRM; the card leaves the screen (reading there clears it everywhere).
 func (a *App) Open(key string) {
 	if c, ok := a.Q.Get(key); ok {
-		a.open(c.URL)
+		if key == UpdateKey {
+			a.openRelease(c.URL)
+		} else {
+			a.open(c.URL)
+		}
 	}
 	a.Q.Dismiss(key)
 	a.changed()
@@ -399,6 +417,22 @@ type handler struct{ a *App }
 func (h handler) Sync(s api.Snapshot) { h.a.play(h.a.Q.Sync(s)); h.a.changed() }
 func (h handler) Card(c api.Card)     { h.a.play(h.a.Q.Card(c)); h.a.changed() }
 func (h handler) Clear(keys []string) { h.a.Q.Clear(keys...); h.a.changed() }
+func (h handler) Contract(v string) {
+	if v == "" {
+		v = "1.0" // CRM 0.0.40 before the field: contract 1.0
+	}
+	if major(v) != major(Contract) {
+		h.a.mu.Lock()
+		h.a.lastError = "портал работает по контракту " + v + ", приложение — " + Contract + ": обновите приложение"
+		h.a.mu.Unlock()
+		h.a.log().Warn("contract mismatch", "crm", v, "app", Contract)
+		go func() { _, _ = h.a.CheckUpdate(context.Background()) }()
+		h.a.changed()
+	}
+}
+
+func major(v string) string { m, _, _ := strings.Cut(v, "."); return m }
+
 func (h handler) State(s string) {
 	if s == stream.StateSignedOut {
 		return // signedOut() is called when Run returns
