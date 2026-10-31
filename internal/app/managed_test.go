@@ -326,6 +326,28 @@ func TestSettingsPortalReplacesSaved(t *testing.T) {
 	}
 }
 
+func TestActiveWithinAMinute(t *testing.T) {
+	var idle time.Duration
+	ok := true
+	a := &App{P: Platform{Idle: func() (time.Duration, bool) { return idle, ok }}}
+	for _, c := range []struct {
+		idle          time.Duration
+		ok            bool
+		active, known bool
+	}{
+		{0, true, true, true},
+		{59 * time.Second, true, true, true},
+		{time.Minute, true, false, true},
+		{time.Hour, true, false, true},
+		{0, false, false, false},
+	} {
+		idle, ok = c.idle, c.ok
+		if active, known := a.active(); active != c.active || known != c.known {
+			t.Errorf("%v %v: %v %v", c.idle, c.ok, active, known)
+		}
+	}
+}
+
 func TestPauseClosesTheSocket(t *testing.T) {
 	crm := &readCRM{at: []time.Time{time.Now()}}
 	srv := httptest.NewServer(crm)

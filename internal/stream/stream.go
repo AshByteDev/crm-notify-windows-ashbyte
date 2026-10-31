@@ -37,9 +37,10 @@ const (
 )
 
 const (
-	pingEvery    = 25 * time.Second // the server drops a socket silent for 75 s
-	refreshEvery = 12 * time.Minute // access tokens live 15 minutes
-	maxPause     = time.Minute
+	pingEvery     = 25 * time.Second // the server drops a socket silent for 75 s
+	refreshEvery  = 12 * time.Minute // access tokens live 15 minutes
+	maxPause      = time.Minute
+	activityEvery = 5 * time.Second // how often Active is asked
 )
 
 // ErrSignedOut: the session of the app is over — sign in again.
@@ -69,6 +70,11 @@ type Stream struct {
 	Log       *slog.Logger
 	// Dial is replaceable in tests.
 	Dial func(ctx context.Context, url string) (*websocket.Conn, error)
+	// Active tells whether the person works at the computer; known=false — it cannot be told now. It is reported to the
+	// CRM (contract §5.7); nil — nothing is reported.
+	Active func() (active, known bool)
+	// every overrides activityEvery in tests.
+	every time.Duration
 
 	mu    sync.Mutex
 	conn  *websocket.Conn
@@ -254,6 +260,9 @@ func (s *Stream) session(ctx context.Context) error {
 	}
 	s.live, s.held = true, nil
 	s.dmu.Unlock()
+	if s.Active != nil {
+		go s.reportActivity(sctx)
+	}
 
 	ping := time.NewTicker(pingEvery)
 	defer ping.Stop()
@@ -280,6 +289,35 @@ func (s *Stream) session(ctx context.Context) error {
 			} else if f.OK == nil || !*f.OK {
 				return errors.New("auth.refresh refused")
 			}
+		}
+	}
+}
+
+// reportActivity sends notify.activity at once and then on every change, for as long as the socket lives: the CRM forgets
+// it with the socket. It has its own goroutine, so a CRM slow to answer does not hold back the ping. An answer with an
+// error (a CRM older than 1.2) changes nothing for the cards and is not sent again until the state changes.
+func (s *Stream) reportActivity(ctx context.Context) {
+	every := s.every
+	if every == 0 {
+		every = activityEvery
+	}
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	var sent, reported bool
+	for {
+		if active, known := s.Active(); known && (!reported || active != sent) {
+			sent, reported = active, true
+			f, err := s.request(ctx, "notify.activity", map[string]bool{"active": active})
+			if err != nil {
+				s.log().Debug("stream: activity not sent", "err", err)
+			} else if f.Error != nil {
+				s.log().Debug("stream: activity refused", "code", f.Error.Code)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
 		}
 	}
 }

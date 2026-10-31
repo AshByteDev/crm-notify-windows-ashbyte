@@ -31,8 +31,11 @@ const (
 	Offline    = stream.StateOffline
 )
 
+// activeWithin: the person counts as working while the last input is this recent (contract §5.7).
+const activeWithin = time.Minute
+
 // Contract is the version of docs/NOTIFY_CONTRACT.md the app speaks; a CRM with another major version needs another app.
-const Contract = "1.1"
+const Contract = "1.2"
 
 // Places of the cards on the screen (the setting «Где показывать уведомления»).
 const (
@@ -72,6 +75,8 @@ type Platform struct {
 	Start func(path string, args ...string) error
 	// Uninstall removes the app from the profile of the user (nil — not supported here).
 	Uninstall func() error
+	// Idle is the time since the last input in this session of Windows; false — unknown (nil — not supported here).
+	Idle func() (time.Duration, bool)
 }
 
 // App is the whole client.
@@ -344,6 +349,9 @@ func (a *App) connect(ctx context.Context) {
 	sctx, stop := context.WithCancel(ctx)
 	a.stop, a.paused = stop, false
 	s := &stream.Stream{URL: stream.WSURL(a.Server), UserAgent: a.userAgent(), Tokens: a.token, H: handler{a}, Log: a.log()}
+	if a.P.Idle != nil {
+		s.Active = a.active
+	}
 	a.stream = s
 	a.state = Connecting
 	a.mu.Unlock()
@@ -364,6 +372,12 @@ func (a *App) connect(ctx context.Context) {
 			a.signedOut("сессия завершена — войдите снова")
 		}
 	}()
+}
+
+// active is what the CRM learns about the person: only yes or no, never what they work in (contract §5.7).
+func (a *App) active() (active, known bool) {
+	idle, ok := a.P.Idle()
+	return ok && idle < activeWithin, ok
 }
 
 func (a *App) signedOut(why string) {

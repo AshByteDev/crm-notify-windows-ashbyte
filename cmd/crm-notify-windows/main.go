@@ -61,7 +61,7 @@ func newApp() (*app.App, error) {
 		Launcher: launcher, Shared: !managed.Writable(filepath.Dir(exe)), Settings: settings, Log: log,
 		P: app.Platform{OpenURL: platform.OpenURL, PlaySound: platform.PlaySound, Autostart: platform.Autostart,
 			SetAutostart: func(on bool) error { return platform.SetAutostart(launcher, on) }, Start: platform.Start,
-			Uninstall: platform.Uninstall},
+			Uninstall: platform.Uninstall, Idle: platform.Idle},
 	}, nil
 }
 
