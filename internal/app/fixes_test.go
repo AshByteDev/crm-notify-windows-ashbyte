@@ -232,3 +232,51 @@ func TestPosition(t *testing.T) {
 		t.Fatalf("unknown place %q", p)
 	}
 }
+
+// The check in the settings: the account and the CRM in the text, a local card with a sound, nothing sent to read.
+func TestNotifyCheck(t *testing.T) {
+	crm := &readCRM{at: []time.Time{time.Now()}}
+	srv := httptest.NewServer(crm)
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := online(t, ctx, srv.URL)
+	sounds := 0
+	a.P.PlaySound = func(string) { sounds++ }
+	a.mu.Lock()
+	a.user = "Иван Петров"
+	a.mu.Unlock()
+	a.TestNotify(ctx)
+	if v := a.View(); !strings.Contains(v.Test, "«Иван Петров»") || !strings.Contains(v.Test, "новых: 1") {
+		t.Fatal(v.Test)
+	}
+	if _, ok := a.Q.Get(TestKey); !ok || sounds != 1 {
+		t.Fatalf("card %v sounds %d", ok, sounds)
+	}
+	a.handlerSync(api.Snapshot{})
+	if _, ok := a.Q.Get(TestKey); !ok {
+		t.Fatal("the state of the server keeps a local card")
+	}
+	a.Read(ctx, TestKey)
+	time.Sleep(50 * time.Millisecond)
+	if _, reads := crm.counts(); reads != 0 {
+		t.Fatalf("reads %d", reads)
+	}
+}
+
+func (a *App) handlerSync(s api.Snapshot) { handler{a}.Sync(s) }
+
+func TestNotifyCheckSignedOutAndDND(t *testing.T) {
+	ctx := context.Background()
+	a := &App{Dir: t.TempDir(), Version: "1"}
+	a.Start(ctx)
+	a.SetDND(true)
+	a.TestNotify(ctx)
+	v := a.View()
+	if !strings.Contains(v.Test, "Вход не выполнен") || !strings.Contains(v.Test, "Не беспокоить") {
+		t.Fatal(v.Test)
+	}
+	if v.Queue.Waiting != 1 {
+		t.Fatalf("%+v", v.Queue)
+	}
+}

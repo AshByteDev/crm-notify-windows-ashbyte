@@ -451,6 +451,9 @@ func (u *UI) menu() {
 func (u *UI) refresh() {
 	rescaled := u.syncScale()
 	v := u.A.View()
+	if u.settings.hwnd != 0 {
+		pInvalidateRect.Call(u.settings.hwnd, 0, 0) // the result of the check
+	}
 	d := u.trayData(v)
 	pShellNotifyIconW.Call(nimModify, ptr(&d))
 	type want struct {

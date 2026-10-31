@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -54,6 +55,9 @@ func NormalPosition(p string) string {
 // UpdateKey is the local card «Доступна новая версия».
 const UpdateKey = "update"
 
+// TestKey is the local card of the check in the settings.
+const TestKey = "test"
+
 // soundGap: a burst of messages gives one sound.
 const soundGap = 2 * time.Second
 
@@ -101,6 +105,7 @@ type App struct {
 	refreshMu sync.Mutex
 	update    *Release
 	updating  bool
+	testing   string // the result of the last check in the settings
 	// cancelLogin stops waiting for the browser.
 	cancelLogin context.CancelFunc
 	// unsent: cards marked «Прочитано» when the CRM could not be reached; sent again after the next snapshot.
@@ -120,6 +125,7 @@ type View struct {
 	CheckUpdates  bool
 	Autostart     bool
 	Position      string // where the cards are shown: TopLeft … BottomRight
+	Test          string // the result of the last check in the settings
 	Version       string
 	Server        string
 }
@@ -164,7 +170,7 @@ func (a *App) View() View {
 	defer a.mu.Unlock()
 	v := View{State: a.state, User: a.user, Error: a.lastError, DND: a.cfg.DND, CheckUpdates: a.cfg.CheckUpdates,
 		Version: a.Version, Server: a.Server, DefaultServer: a.DefaultServer, Update: a.update, Updating: a.updating,
-		Position: NormalPosition(a.cfg.Position)}
+		Position: NormalPosition(a.cfg.Position), Test: a.testing}
 	if a.Q != nil {
 		v.Queue = a.Q.View()
 	}
@@ -387,7 +393,7 @@ func (a *App) Open(key string) {
 func (a *App) Read(ctx context.Context, key string) {
 	a.Q.Dismiss(key)
 	a.changed()
-	if key == UpdateKey {
+	if key == UpdateKey || key == TestKey {
 		return
 	}
 	a.mu.Lock()
@@ -437,6 +443,43 @@ func (a *App) sendUnsent() {
 // Close (×) removes the card here only; a newer message brings it back.
 func (a *App) Close(key string) {
 	a.Q.Dismiss(key)
+	a.changed()
+}
+
+// TestNotify is the check in the settings: it asks the CRM through the socket under the signed-in account, then shows
+// a test card with a sound. The CRM is not changed. Blocks while asking (call it in the background).
+func (a *App) TestNotify(ctx context.Context) {
+	a.mu.Lock()
+	s, user, dnd := a.stream, a.user, a.cfg.DND
+	a.testing = "Проверяю…"
+	a.mu.Unlock()
+	a.changed()
+	var text string
+	if s == nil {
+		text = "Вход не выполнен: уведомления не придут, пока вы не войдёте."
+	} else {
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		sn, err := s.Check(cctx)
+		cancel()
+		switch {
+		case err != nil:
+			text = "Нет связи с CRM: " + err.Error()
+		case user == "":
+			text = fmt.Sprintf("Связь с CRM есть, новых уведомлений: %d.", sn.Total)
+		default:
+			text = fmt.Sprintf("Связь с CRM есть. Уведомления приходят сотруднику «%s», новых: %d.", user, sn.Total)
+		}
+	}
+	if dnd {
+		text += " Включено «Не беспокоить»: карточка появится после выключения."
+	}
+	a.Q.Local(api.Card{Key: TestKey, Kind: "test", Title: "Проверка уведомлений", Body: text, URL: "/team", At: time.Now(), Sound: api.SoundOther})
+	if a.P.PlaySound != nil {
+		a.P.PlaySound(api.SoundOther)
+	}
+	a.mu.Lock()
+	a.testing = text
+	a.mu.Unlock()
 	a.changed()
 }
 
