@@ -15,6 +15,7 @@ var (
 	gdi32    = windows.NewLazySystemDLL("gdi32.dll")
 	shell32  = windows.NewLazySystemDLL("shell32.dll")
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
+	wtsapi32 = windows.NewLazySystemDLL("wtsapi32.dll")
 
 	pRegisterClassExW              = user32.NewProc("RegisterClassExW")
 	pCreateWindowExW               = user32.NewProc("CreateWindowExW")
@@ -51,6 +52,7 @@ var (
 	pCreateIconFromResourceEx      = user32.NewProc("CreateIconFromResourceEx")
 	pDestroyIcon                   = user32.NewProc("DestroyIcon")
 	pTrackMouseEvent               = user32.NewProc("TrackMouseEvent")
+	pFindWindowW                   = user32.NewProc("FindWindowW")
 	pSetTimer                      = user32.NewProc("SetTimer")
 	pKillTimer                     = user32.NewProc("KillTimer")
 	pMessageBoxW                   = user32.NewProc("MessageBoxW")
@@ -80,6 +82,9 @@ var (
 
 	pShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
 
+	pWTSRegisterSessionNotification   = wtsapi32.NewProc("WTSRegisterSessionNotification")
+	pWTSUnRegisterSessionNotification = wtsapi32.NewProc("WTSUnRegisterSessionNotification")
+
 	pGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
 	pCreateMutexW     = kernel32.NewProc("CreateMutexW")
 	pCloseHandle      = kernel32.NewProc("CloseHandle")
@@ -100,12 +105,18 @@ const (
 	wmRButtonUp      = 0x0205
 	wmMouseLeave     = 0x02A3
 	wmPowerBroadcast = 0x0218
+	wmSessionChange  = 0x02B1
 	wmNull           = 0x0000
 	wmApp            = 0x8000
 	wmTray           = wmApp + 1
 	wmRefresh        = wmApp + 2
 
 	pbtResumeAutomatic = 0x0012
+
+	wtsConsoleConnect    = 1
+	wtsConsoleDisconnect = 2
+	wtsRemoteConnect     = 3
+	wtsRemoteDisconnect  = 4
 
 	wmCommand        = 0x0111
 	wmSetFont        = 0x0030

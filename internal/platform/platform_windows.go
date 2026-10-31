@@ -63,13 +63,7 @@ func OpenURL(u string) error {
 // Replace puts the downloaded version in place of the running file (a running .exe cannot be overwritten but can
 // be renamed) and starts it; the caller quits. The old file is removed by the next start (CleanupOld).
 func Replace(running, downloaded string) error {
-	old := running + ".old"
-	_ = os.Remove(old)
-	if err := os.Rename(running, old); err != nil {
-		return err
-	}
-	if err := os.Rename(downloaded, running); err != nil {
-		_ = os.Rename(old, running)
+	if err := Swap(running, downloaded); err != nil {
 		return err
 	}
 	return exec.Command(running, "--updated").Start()
@@ -80,6 +74,29 @@ func CleanupOld() {
 	if exe, err := os.Executable(); err == nil {
 		_ = os.Remove(exe + ".old")
 	}
+}
+
+// Uninstall removes the app from the profile of the user: autostart, the shortcut, the settings and, after the app has
+// closed, the folder of the copy (a running file cannot be removed by itself).
+func Uninstall() error {
+	if err := SetAutostart(false); err != nil {
+		return err
+	}
+	if p, err := shortcutPath(); err == nil {
+		_ = os.Remove(p)
+	}
+	home, err := Home()
+	if err != nil {
+		return err
+	}
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("cmd.exe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true,
+		CmdLine: `cmd.exe /c ping -n 4 127.0.0.1 >nul & rmdir /s /q "` + home + `" & rmdir /s /q "` + dir + `"`}
+	return cmd.Start()
 }
 
 const runKey = `Software\Microsoft\Windows\CurrentVersion\Run`

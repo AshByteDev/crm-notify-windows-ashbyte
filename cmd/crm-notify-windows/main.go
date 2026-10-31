@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/managed"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/platform"
 )
 
@@ -24,6 +25,8 @@ func newApp() (*app.App, error) {
 	srv := flag.String("server", "", "адрес портала AshCRM (вместо сохранённого)")
 	_ = flag.Bool("autostart", false, "запущено вместе с Windows")
 	_ = flag.Bool("updated", false, "запущено после обновления")
+	_ = flag.Bool("installed", false, "запущено после установки из папки администратора")
+	_ = flag.Bool("uninstall", false, "удалить приложение из профиля пользователя")
 	flag.Parse()
 	platform.CleanupOld()
 	dir, err := platform.Dir()
@@ -38,9 +41,21 @@ func newApp() (*app.App, error) {
 			platform.DeleteSecret(dir)
 		}
 	}
-	return &app.App{DefaultServer: server, Version: version, Repo: repo, Dir: dir, Device: app.DeviceName(), Log: logger(dir),
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	log := logger(dir)
+	var settings *managed.Config // the file of the administrator next to the running copy
+	if c, ok, err := managed.Load(filepath.Dir(exe)); err != nil {
+		log.Warn("managed settings", "err", err)
+	} else if ok {
+		settings = &c
+	}
+	return &app.App{DefaultServer: server, Version: version, Repo: repo, Dir: dir, Device: app.DeviceName(), Exe: exe,
+		Managed: settings, Log: log,
 		P: app.Platform{OpenURL: platform.OpenURL, PlaySound: platform.PlaySound, Autostart: platform.Autostart,
-			SetAutostart: platform.SetAutostart, Replace: platform.Replace},
+			SetAutostart: platform.SetAutostart, Replace: platform.Replace, Uninstall: platform.Uninstall},
 	}, nil
 }
 

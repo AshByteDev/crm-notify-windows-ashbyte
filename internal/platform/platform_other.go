@@ -34,5 +34,11 @@ func PlaySound(class string) { fmt.Fprint(os.Stderr, "\a") }
 // Replace is not supported outside Windows (nil in app.Platform).
 var Replace func(running, downloaded string) error
 
+// Uninstall is not supported outside Windows (nil in app.Platform).
+var Uninstall func() error
+
+// Shortcut does nothing outside Windows.
+func Shortcut(string) error { return nil }
+
 // CleanupOld does nothing outside Windows.
 func CleanupOld() {}
