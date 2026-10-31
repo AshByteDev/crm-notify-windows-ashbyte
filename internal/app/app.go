@@ -116,9 +116,12 @@ type App struct {
 	refreshMu sync.Mutex
 	syncing   sync.Mutex // one look at the folder of the administrator at a time
 	paused    bool       // the person left the session of Windows
-	update    *Release
-	updating  bool
-	testing   string // the result of the last check in the settings
+	// «Прочитать все»: how many are still to read and up to what moment.
+	readAllLeft int
+	readAllAt   time.Time
+	update      *Release
+	updating    bool
+	testing     string // the result of the last check in the settings
 	// cancelLogin stops waiting for the browser.
 	cancelLogin context.CancelFunc
 	// unsent: cards marked «Прочитано» when the CRM could not be reached; sent again after the next snapshot.
@@ -178,6 +181,7 @@ func (a *App) Load() {
 	a.Server = a.cfg.Server
 	a.Q = queue.New()
 	a.Q.SetDND(a.cfg.DND)
+	a.applyShow()
 	a.state = NeedServer
 	if a.Server != "" {
 		a.api = api.New(a.Server, a.userAgent())
@@ -484,6 +488,41 @@ func (a *App) sendUnsent() {
 	}
 }
 
+// ReadAll reads everything unread at this moment. The app holds at most a snapshot of the cards, the rest comes with
+// the next notify.sync: only what was there when the person asked is read, a newer message stays.
+func (a *App) ReadAll(ctx context.Context) {
+	left := a.Q.View().Unread
+	a.mu.Lock()
+	a.readAllLeft, a.readAllAt = left, time.Now()
+	a.mu.Unlock()
+	a.readNext(ctx)
+}
+
+// readNext reads the cards the app has now from those asked for.
+func (a *App) readNext(ctx context.Context) {
+	a.mu.Lock()
+	s, left, at := a.stream, a.readAllLeft, a.readAllAt
+	a.mu.Unlock()
+	if s == nil || left <= 0 {
+		return
+	}
+	keys := a.Q.Unread(at)
+	if len(keys) > left {
+		keys = keys[:left]
+	}
+	for _, k := range keys {
+		a.Q.Dismiss(k)
+		go a.sendRead(ctx, s, k)
+	}
+	a.mu.Lock()
+	a.readAllLeft = left - len(keys)
+	if len(keys) == 0 {
+		a.readAllLeft = 0
+	}
+	a.mu.Unlock()
+	a.changed()
+}
+
 // Close (×) removes the card here only; a newer message brings it back.
 func (a *App) Close(key string) {
 	a.Q.Dismiss(key)
@@ -590,7 +629,12 @@ func (a *App) play(class string) {
 // handler is the stream.Handler of the app.
 type handler struct{ a *App }
 
-func (h handler) Sync(s api.Snapshot) { h.a.Q.Sync(s); h.a.sendUnsent(); h.a.changed() }
+func (h handler) Sync(s api.Snapshot) {
+	h.a.Q.Sync(s)
+	h.a.sendUnsent()
+	h.a.readNext(context.Background())
+	h.a.changed()
+}
 func (h handler) Card(c api.Card)     { h.a.play(h.a.Q.Card(c)); h.a.changed() }
 func (h handler) Clear(keys []string) { h.a.Q.Clear(keys...); h.a.changed() }
 func (h handler) Contract(v string) {

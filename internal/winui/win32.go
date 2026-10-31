@@ -103,6 +103,7 @@ const (
 	wmMouseMove      = 0x0200
 	wmLButtonUp      = 0x0202
 	wmRButtonUp      = 0x0205
+	wmMouseWheel     = 0x020A
 	wmMouseLeave     = 0x02A3
 	wmPowerBroadcast = 0x0218
 	wmSessionChange  = 0x02B1

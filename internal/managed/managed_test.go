@@ -34,7 +34,7 @@ func TestLoad(t *testing.T) {
 	}
 	write(t, filepath.Join(dir, ConfigName), bom+`{"server":"https://crm.example.ru"}`)
 	c, ok, err := Load(dir)
-	if !ok || err != nil || c.Server != "https://crm.example.ru" || c.UpdateCheckMinutes != DefaultMinutes {
+	if !ok || err != nil || c.Server != "https://crm.example.ru" || c.UpdateCheckMinutes != DefaultMinutes || c.NotificationSeconds != DefaultSeconds {
 		t.Fatalf("%+v %v %v", c, ok, err)
 	}
 	write(t, filepath.Join(dir, ConfigName), `{"update_check_minutes":0,"version":"v0.0.10"}`)
@@ -50,7 +50,7 @@ func TestLoad(t *testing.T) {
 // The file the app writes holds examples in comments and still reads back; a // inside a value stays.
 func TestConfigWithComments(t *testing.T) {
 	dir := t.TempDir()
-	want := Config{Server: "https://crm.example.ru", UpdateCheckMinutes: 15, Version: "0.0.11"}
+	want := Config{Server: "https://crm.example.ru", NotificationSeconds: 8, UpdateCheckMinutes: 15, Version: "0.0.11"}
 	if err := Save(dir, want); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestConfigWithComments(t *testing.T) {
 		t.Fatalf("%+v %v %v", got, ok, err)
 	}
 	b, _ := os.ReadFile(filepath.Join(dir, ConfigName))
-	for _, part := range []string{"// server", "// update_check_minutes", "// version", "// disabled"} {
+	for _, part := range []string{"// server", "// notification_seconds", "// update_check_minutes", "// version", "// disabled"} {
 		if !strings.Contains(string(b), part) {
 			t.Errorf("no %q", part)
 		}

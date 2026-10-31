@@ -286,3 +286,130 @@ func TestHiddenCardsAreBounded(t *testing.T) {
 		t.Fatalf("kept %d", v.Unread)
 	}
 }
+
+func TestSetShow(t *testing.T) {
+	m := New()
+	m.SetShow(time.Hour)
+	m.Card(card("a", 1, 1))
+	m.Tick(later(1))
+	if keys(m.View()) != "a " {
+		t.Fatal("the time of the settings")
+	}
+	m.SetShow(0)
+	m.Card(card("b", 1, 2))
+	if d := time.Until(m.until["b"]); d > Show {
+		t.Fatal("nothing set — the default", d)
+	}
+}
+
+func filled(n int) *Manager {
+	m := New()
+	for i := 1; i <= n; i++ {
+		m.Card(card(fmt.Sprint("c", i), 1, i))
+	}
+	return m
+}
+
+// The list shows the newest three of everything unread, shown before or not, and stops the timers.
+func TestBrowse(t *testing.T) {
+	m := filled(5)
+	m.Tick(later(1))
+	m.Tick(later(2))
+	m.Browse()
+	v := m.View()
+	if keys(v) != "c5 c4 c3 " || !v.Browsing || v.Listed != 5 || v.Waiting != 0 {
+		t.Fatalf("%q %+v", keys(v), v)
+	}
+	m.Scroll(1)
+	if keys(m.View()) != "c4 c3 c2 " {
+		t.Fatal(keys(m.View()))
+	}
+	m.Scroll(9)
+	if v := m.View(); keys(v) != "c3 c2 c1 " || v.Offset != 2 {
+		t.Fatal(keys(v), v.Offset)
+	}
+	m.Scroll(-9)
+	if keys(m.View()) != "c5 c4 c3 " {
+		t.Fatal(keys(m.View()))
+	}
+}
+
+func TestBrowseEndsWithoutMouse(t *testing.T) {
+	m := filled(2)
+	m.Browse()
+	if !m.Hold(StripKey, true) {
+		t.Fatal("the strip holds the list")
+	}
+	if !m.View().Next.IsZero() {
+		t.Fatal("no end under the mouse")
+	}
+	m.Tick(later(1))
+	if !m.View().Browsing {
+		t.Fatal("the mouse is there")
+	}
+	m.Hold(StripKey, false)
+	m.Tick(later(1))
+	v := m.View()
+	if v.Browsing || keys(v) != "" || v.Unread != 2 {
+		t.Fatalf("%q %+v", keys(v), v)
+	}
+}
+
+// Working through the list: the card goes, the next one comes, an empty list closes.
+func TestBrowseActions(t *testing.T) {
+	m := filled(4)
+	m.Browse()
+	m.Scroll(1)
+	m.Dismiss("c1")
+	if v := m.View(); keys(v) != "c4 c3 c2 " || v.Offset != 0 {
+		t.Fatalf("%q %d", keys(v), v.Offset)
+	}
+	m.Clear("c4", "c3", "c2")
+	if v := m.View(); v.Browsing || v.Unread != 0 {
+		t.Fatalf("%+v", v)
+	}
+}
+
+// A new message during the list joins it and is shown as usual afterwards.
+func TestNewCardDuringBrowse(t *testing.T) {
+	m := filled(1)
+	m.Browse()
+	m.Card(card("new", 1, 9))
+	if keys(m.View()) != "new c1 " {
+		t.Fatal(keys(m.View()))
+	}
+	m.EndBrowse()
+	if keys(m.View()) != "new " {
+		t.Fatal(keys(m.View()))
+	}
+}
+
+// The cards of the app stay out of the list and come back after it.
+func TestBrowseLeavesLocalCards(t *testing.T) {
+	m := filled(1)
+	m.Local(card("update", 0, 5))
+	m.Browse()
+	if keys(m.View()) != "c1 " {
+		t.Fatal(keys(m.View()))
+	}
+	m.EndBrowse()
+	if keys(m.View()) != "update " {
+		t.Fatal(keys(m.View()))
+	}
+}
+
+func TestBrowseNeedsCards(t *testing.T) {
+	m := New()
+	m.Local(card("update", 0, 5))
+	m.Browse()
+	if m.View().Browsing {
+		t.Fatal("nothing to list")
+	}
+}
+
+func TestUnreadBefore(t *testing.T) {
+	m := filled(3)
+	if got := m.Unread(t0.Add(2 * time.Minute)); len(got) != 2 || got[0] != "c2" {
+		t.Fatal(got)
+	}
+}

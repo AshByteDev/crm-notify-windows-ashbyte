@@ -81,9 +81,10 @@ func TestStripText(t *testing.T) {
 		want string
 	}{
 		{queue.View{}, ""},
-		{queue.View{Unread: 1}, "1 уведомление — открыть AshCRM"},
-		{queue.View{Unread: 3}, "3 уведомления — открыть AshCRM"},
-		{queue.View{Unread: 11, DND: true}, "11 уведомлений · не беспокоить — открыть AshCRM"},
+		{queue.View{Unread: 1}, "1 уведомление"},
+		{queue.View{Unread: 3}, "3 уведомления"},
+		{queue.View{Unread: 11, DND: true}, "11 уведомлений · не беспокоить"},
+		{queue.View{Unread: 12, Browsing: true, Offset: 3, Listed: 12, Visible: make([]api.Card, 3)}, "4–6 из 12 · колесо мыши листает"},
 	} {
 		if got := stripText(c.q); got != c.want {
 			t.Errorf("%+v: %q", c.q, got)
