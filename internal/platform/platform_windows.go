@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -44,7 +45,30 @@ var (
 	shellExecuteW = shell32.NewProc("ShellExecuteW")
 	winmm         = windows.NewLazySystemDLL("winmm.dll")
 	playSoundW    = winmm.NewProc("PlaySoundW")
+	user32        = windows.NewLazySystemDLL("user32.dll")
+
+	getLastInputInfo = user32.NewProc("GetLastInputInfo")
+	getTickCount     = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetTickCount")
 )
+
+// lastInputInfo is LASTINPUTINFO.
+type lastInputInfo struct {
+	Size uint32
+	Time uint32
+}
+
+// Idle is the time since the last keyboard or mouse input. GetLastInputInfo sees only the session of the caller, so on a
+// terminal server every copy watches its own employee. Its time is 32-bit milliseconds since boot and is compared in
+// 32 bits, which survives the wrap after 49 days; the input is read first, so the clock is never behind it.
+func Idle() (time.Duration, bool) {
+	in := lastInputInfo{}
+	in.Size = uint32(unsafe.Sizeof(in))
+	if r, _, _ := getLastInputInfo.Call(uintptr(unsafe.Pointer(&in))); r == 0 {
+		return 0, false
+	}
+	now, _, _ := getTickCount.Call()
+	return time.Duration(uint32(now)-in.Time) * time.Millisecond, true
+}
 
 // OpenURL opens a page in the default browser.
 func OpenURL(u string) error {

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,6 +45,14 @@ type fakeCRM struct {
 	refuse    bool                 // notify.read is answered with an error
 	tokens    []string
 	agents    []string
+	activity  []string // the data of the notify.activity frames, in order
+	refuseAll bool     // notify.activity is answered like by a CRM older than 1.2
+}
+
+func (f *fakeCRM) frames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.activity...)
 }
 
 func (f *fakeCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +113,16 @@ func (f *fakeCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.mu.Unlock()
 			if refuse {
 				send(map[string]any{"re": in.ID, "ok": false, "error": map[string]any{"code": "validation", "message": "нет такой карточки"}})
+				continue
+			}
+			send(map[string]any{"re": in.ID, "ok": ok, "data": map[string]any{"ok": true}})
+		case "notify.activity":
+			f.mu.Lock()
+			f.activity = append(f.activity, string(in.Data))
+			refuse := f.refuseAll
+			f.mu.Unlock()
+			if refuse {
+				send(map[string]any{"re": in.ID, "ok": false, "error": map[string]any{"code": "forbidden", "message": "нет такого кадра"}})
 				continue
 			}
 			send(map[string]any{"re": in.ID, "ok": ok, "data": map[string]any{"ok": true}})
@@ -254,6 +273,93 @@ func TestReadRefused(t *testing.T) {
 	if err := s.Read(ctx, "chat-1"); !errors.Is(err, ErrRefused) {
 		t.Fatalf("got %v", err)
 	}
+}
+
+func waitFrames(t *testing.T, crm *fakeCRM, want ...string) {
+	t.Helper()
+	got := crm.frames()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end) && len(got) < len(want); time.Sleep(5 * time.Millisecond) {
+		got = crm.frames()
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("frames %v, want %v", got, want)
+	}
+}
+
+// The state is sent after every snapshot and then only when it changes (contract §5.7).
+func TestActivityAfterConnectAndOnChange(t *testing.T) {
+	crm := &fakeCRM{closeLive: websocket.StatusGoingAway}
+	srv := httptest.NewServer(crm)
+	defer srv.Close()
+	var active atomic.Bool
+	active.Store(true)
+	s := &Stream{URL: WSURL(srv.URL), H: &rec{}, every: 10 * time.Millisecond,
+		Tokens: func(context.Context, bool) (string, error) { return "tok", nil },
+		Active: func() (bool, bool) { return active.Load(), true }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx) }()
+
+	on, off := `{"active":true}`, `{"active":false}`
+	waitFrames(t, crm, on)
+	time.Sleep(50 * time.Millisecond)
+	if got := crm.frames(); len(got) != 1 {
+		t.Fatalf("no change, but %v", got)
+	}
+	// the first socket closes 200 ms after its snapshot: the new socket is told again, the CRM forgot it with the old one
+	waitFrames(t, crm, on, on)
+	active.Store(false)
+	waitFrames(t, crm, on, on, off)
+}
+
+// A CRM older than 1.2 refuses the frame: the connection lives on, the frame is not repeated.
+func TestActivityRefused(t *testing.T) {
+	crm := &fakeCRM{refuseAll: true, closeLive: websocket.StatusGoingAway}
+	srv := httptest.NewServer(crm)
+	defer srv.Close()
+	h := &rec{}
+	s := &Stream{URL: WSURL(srv.URL), H: h, every: 5 * time.Millisecond,
+		Tokens: func(context.Context, bool) (string, error) { return "tok", nil },
+		Active: func() (bool, bool) { return true, true }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx) }()
+	waitFrames(t, crm, `{"active":true}`)
+	time.Sleep(50 * time.Millisecond)
+	if got := crm.frames(); len(got) != 1 {
+		t.Fatalf("repeated: %v", got)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.states[len(h.states)-1] != StateOnline {
+		t.Fatalf("states %v", h.states)
+	}
+}
+
+// While the state is unknown nothing is sent: the frame is optional, and a guess would ring the phone or silence it.
+func TestActivityUnknownIsNotSent(t *testing.T) {
+	crm := &fakeCRM{}
+	srv := httptest.NewServer(crm)
+	defer srv.Close()
+	h := &rec{}
+	var known atomic.Bool
+	s := &Stream{URL: WSURL(srv.URL), H: h, every: 5 * time.Millisecond,
+		Tokens: func(context.Context, bool) (string, error) { return "tok", nil },
+		Active: func() (bool, bool) { return false, known.Load() }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx) }()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if n, _, _ := h.count(); n > 0 {
+			break
+		}
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := crm.frames(); len(got) != 0 {
+		t.Fatalf("sent %v", got)
+	}
+	known.Store(true)
+	waitFrames(t, crm, `{"active":false}`)
 }
 
 func TestWSURL(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 )
 
 // Development on Linux/macOS: the file itself is the protection (0600), no autostart, sounds as a terminal bell.
@@ -33,6 +34,9 @@ func PlaySound(class string) { fmt.Fprint(os.Stderr, "\a") }
 
 // Uninstall is not supported outside Windows (nil in app.Platform).
 var Uninstall func() error
+
+// Idle is not known outside Windows (nil in app.Platform).
+var Idle func() (time.Duration, bool)
 
 // Shortcut does nothing outside Windows.
 func Shortcut(string) error { return nil }
