@@ -100,7 +100,7 @@ func TestUpdateFromRelease(t *testing.T) {
 	quit := false
 	a := &App{Version: "0.0.3", Repo: "o/r", Dir: t.TempDir(), Exe: filepath.Join(dir, managed.ExeName), Quit: func() { quit = true },
 		P: Platform{Start: func(path string, args ...string) error { started = path; return nil }}}
-	a.Start(context.Background())
+	a.Load() // not Start: its background check would write the same update while this test changes it
 	r, err := a.CheckUpdate(context.Background())
 	if err != nil || r == nil || r.Version != "9.9.9" {
 		t.Fatalf("%+v %v", r, err)
