@@ -42,8 +42,10 @@ func TestNormalizeServer(t *testing.T) {
 }
 
 func TestProbe(t *testing.T) {
+	var agent string
 	crm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/auth/desktop/token" {
+			agent = r.Header.Get("User-Agent")
 			w.WriteHeader(401)
 			fmt.Fprint(w, `{"error":{"code":"unauthorized","message":"x"}}`)
 			return
@@ -60,13 +62,16 @@ func TestProbe(t *testing.T) {
 	}))
 	defer old.Close()
 	ctx := context.Background()
-	if err := probe(ctx, crm.URL); err != nil {
+	if err := probe(ctx, crm.URL, "AshCRM-Notify/1 (Windows)"); err != nil {
 		t.Fatal(err)
 	}
-	if err := probe(ctx, site.URL); err == nil || !strings.Contains(err.Error(), "не найден") {
+	if agent != "AshCRM-Notify/1 (Windows)" {
+		t.Fatalf("User-Agent %q", agent)
+	}
+	if err := probe(ctx, site.URL, ""); err == nil || !strings.Contains(err.Error(), "не найден") {
 		t.Fatalf("a site: %v", err)
 	}
-	if err := probe(ctx, old.URL); err == nil || !strings.Contains(err.Error(), "старая версия") {
+	if err := probe(ctx, old.URL, ""); err == nil || !strings.Contains(err.Error(), "старая версия") {
 		t.Fatalf("an old CRM: %v", err)
 	}
 }

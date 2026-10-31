@@ -33,13 +33,14 @@ type Manager struct {
 	visible   []string // bottom first
 	waiting   []string // first come, first shown
 	dismissed map[string]time.Time
+	local     map[string]bool // cards of the app itself: the state of the server says nothing about them
 	more      int
 	dnd       bool
 }
 
 // New creates an empty manager.
 func New() *Manager {
-	return &Manager{cards: map[string]api.Card{}, dismissed: map[string]time.Time{}}
+	return &Manager{cards: map[string]api.Card{}, dismissed: map[string]time.Time{}, local: map[string]bool{}}
 }
 
 func remove(list []string, key string) ([]string, bool) {
@@ -80,6 +81,7 @@ func (m *Manager) put(c api.Card) (isNew bool) {
 		old := m.waiting[len(m.waiting)-1]
 		m.waiting = m.waiting[:len(m.waiting)-1]
 		delete(m.cards, old)
+		delete(m.local, old)
 	}
 	return true
 }
@@ -97,6 +99,16 @@ func (m *Manager) Card(c api.Card) (sound string) {
 		return ""
 	}
 	return soundOf(c)
+}
+
+// Local adds a card of the app itself («Доступна версия…»): Sync leaves it alone, only an action of the person ends it.
+func (m *Manager) Local(c api.Card) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.dismissed, c.Key)
+	m.local[c.Key] = true
+	m.put(c)
+	m.fill()
 }
 
 func soundOf(c api.Card) string {
@@ -118,14 +130,15 @@ func (m *Manager) Clear(keys ...string) {
 
 func (m *Manager) drop(k string) {
 	delete(m.cards, k)
+	delete(m.local, k)
 	m.visible, _ = remove(m.visible, k)
 	m.waiting, _ = remove(m.waiting, k)
 }
 
 // Sync applies the current state of the server (snapshot after connecting, notify.sync after reading): cards that
 // are gone are dropped, the rest updated, unknown ones added (a card dismissed here comes back only when newer).
-// Returns the sound for cards that came while the app was away ("" — none).
-func (m *Manager) Sync(s api.Snapshot) (sound string) {
+// It is silent: a sound comes only with notify.card (contract §5.5).
+func (m *Manager) Sync(s api.Snapshot) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	present := map[string]bool{}
@@ -133,7 +146,7 @@ func (m *Manager) Sync(s api.Snapshot) (sound string) {
 		present[c.Key] = true
 	}
 	for k := range m.cards {
-		if !present[k] {
+		if !present[k] && !m.local[k] {
 			m.drop(k)
 		}
 	}
@@ -147,22 +160,13 @@ func (m *Manager) Sync(s api.Snapshot) (sound string) {
 			continue
 		}
 		delete(m.dismissed, c.Key)
-		old, had := m.cards[c.Key]
-		if m.put(c) || (had && c.Count > old.Count) {
-			if sound == "" || soundOf(c) == api.SoundClient {
-				sound = soundOf(c)
-			}
-		}
+		m.put(c)
 	}
 	m.more = s.Total - len(s.Cards)
 	if m.more < 0 {
 		m.more = 0
 	}
 	m.fill()
-	if m.dnd {
-		return ""
-	}
-	return sound
 }
 
 // Dismiss removes a card here only (×, «Открыть», «Прочитано» before the server answers); it comes back with a newer
@@ -197,7 +201,7 @@ func (m *Manager) Get(key string) (api.Card, bool) {
 func (m *Manager) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.cards, m.visible, m.waiting, m.dismissed, m.more = map[string]api.Card{}, nil, nil, map[string]time.Time{}, 0
+	m.cards, m.visible, m.waiting, m.dismissed, m.local, m.more = map[string]api.Card{}, nil, nil, map[string]time.Time{}, map[string]bool{}, 0
 }
 
 // View returns what to show.

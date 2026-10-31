@@ -128,7 +128,9 @@ func (a *App) latest(ctx context.Context) (*Release, error) {
 	}
 	if r.SHA256 == "" && sumURL != "" {
 		if b, err := a.get(ctx, sumURL, 1024); err == nil {
-			r.SHA256 = strings.Fields(string(b) + " ")[0]
+			if f := strings.Fields(string(b)); len(f) > 0 {
+				r.SHA256 = f[0]
+			}
 		}
 	}
 	if len(r.SHA256) != 64 {
@@ -154,7 +156,7 @@ func (a *App) CheckUpdate(ctx context.Context) (*Release, error) {
 		if r.Notes != "" {
 			body = r.Notes
 		}
-		a.Q.Card(api.Card{Key: UpdateKey, Kind: "update", Title: "Доступна версия " + r.Version, Body: body, URL: r.Page,
+		a.Q.Local(api.Card{Key: UpdateKey, Kind: "update", Title: "Доступна версия " + r.Version, Body: body, URL: r.Page,
 			At: time.Now(), Sound: api.SoundOther})
 	}
 	a.changed()

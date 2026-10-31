@@ -47,11 +47,12 @@ func localHost(h string) bool {
 }
 
 // probe asks the portal the way the app will: an empty code exchange must be refused by AshCRM with its error.
-func probe(ctx context.Context, server string) error {
+func probe(ctx context.Context, server, userAgent string) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", server+"/api/v1/auth/desktop/token", bytes.NewReader([]byte("{}")))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", userAgent)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("портал не отвечает: %v", err)
@@ -80,7 +81,7 @@ func (a *App) SetServer(ctx context.Context, raw string) error {
 	if err != nil {
 		return err
 	}
-	if err := probe(ctx, server); err != nil {
+	if err := probe(ctx, server, a.userAgent()); err != nil {
 		return err
 	}
 	a.mu.Lock()
@@ -99,6 +100,7 @@ func (a *App) SetServer(ctx context.Context, raw string) error {
 
 // ChangeServer signs out and asks the portal again.
 func (a *App) ChangeServer(ctx context.Context) {
+	a.CancelLogin()
 	a.Logout(ctx)
 	a.mu.Lock()
 	a.state = NeedServer

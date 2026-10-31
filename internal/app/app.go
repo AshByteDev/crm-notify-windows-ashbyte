@@ -32,6 +32,25 @@ const (
 // Contract is the version of docs/NOTIFY_CONTRACT.md the app speaks; a CRM with another major version needs another app.
 const Contract = "1.0"
 
+// Places of the cards on the screen (the setting «Где показывать уведомления»).
+const (
+	TopLeft      = "top-left"
+	TopCenter    = "top-center"
+	TopRight     = "top-right"
+	BottomLeft   = "bottom-left"
+	BottomCenter = "bottom-center"
+	BottomRight  = "bottom-right"
+)
+
+// NormalPosition returns a known place of the cards; anything else (an old or edited config) is the default corner.
+func NormalPosition(p string) string {
+	switch p {
+	case TopLeft, TopCenter, TopRight, BottomLeft, BottomCenter:
+		return p
+	}
+	return BottomRight
+}
+
 // UpdateKey is the local card «Доступна новая версия».
 const UpdateKey = "update"
 
@@ -82,6 +101,10 @@ type App struct {
 	refreshMu sync.Mutex
 	update    *Release
 	updating  bool
+	// cancelLogin stops waiting for the browser.
+	cancelLogin context.CancelFunc
+	// unsent: cards marked «Прочитано» when the CRM could not be reached; sent again after the next snapshot.
+	unsent map[string]bool
 }
 
 // View is what the tray and the cards show.
@@ -96,6 +119,7 @@ type View struct {
 	DND           bool
 	CheckUpdates  bool
 	Autostart     bool
+	Position      string // where the cards are shown: TopLeft … BottomRight
 	Version       string
 	Server        string
 }
@@ -139,7 +163,8 @@ func (a *App) View() View {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	v := View{State: a.state, User: a.user, Error: a.lastError, DND: a.cfg.DND, CheckUpdates: a.cfg.CheckUpdates,
-		Version: a.Version, Server: a.Server, DefaultServer: a.DefaultServer, Update: a.update, Updating: a.updating}
+		Version: a.Version, Server: a.Server, DefaultServer: a.DefaultServer, Update: a.update, Updating: a.updating,
+		Position: NormalPosition(a.cfg.Position)}
 	if a.Q != nil {
 		v.Queue = a.Q.View()
 	}
@@ -164,23 +189,26 @@ func (a *App) Login(ctx context.Context) {
 		return
 	}
 	a.state, a.lastError = SigningIn, ""
+	lctx, cancel := context.WithCancel(ctx)
+	a.cancelLogin = cancel
 	a.mu.Unlock()
 	a.changed()
 	go func() {
-		r, err := login.Run(ctx, a.Server, a.Device, a.P.OpenURL)
+		defer cancel()
+		r, err := login.Run(lctx, a.Server, a.Device, a.P.OpenURL)
 		if err != nil {
-			a.setState(SignedOut, err.Error())
+			a.loginFailed(err.Error())
 			return
 		}
 		tctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		t, err := a.api.Token(tctx, r.Code, r.Verifier)
 		if err != nil {
-			a.setState(SignedOut, "не удалось подключить: "+err.Error())
+			a.loginFailed("не удалось подключить: " + err.Error())
 			return
 		}
 		if err := a.keep(t); err != nil {
-			a.setState(SignedOut, "не удалось сохранить вход: "+err.Error())
+			a.loginFailed("не удалось сохранить вход: " + err.Error())
 			return
 		}
 		a.mu.Lock()
@@ -194,6 +222,28 @@ func (a *App) Login(ctx context.Context) {
 		_ = platform.SaveConfig(a.Dir, cfg)
 		a.connect(ctx)
 	}()
+}
+
+// loginFailed ends a sign-in, unless the state has already moved on (the portal is being changed).
+func (a *App) loginFailed(why string) {
+	a.mu.Lock()
+	if a.state != SigningIn {
+		a.mu.Unlock()
+		return
+	}
+	a.state, a.lastError = SignedOut, why
+	a.mu.Unlock()
+	a.changed()
+}
+
+// CancelLogin stops waiting for the browser (the tab was closed): «Войти» works again at once.
+func (a *App) CancelLogin() {
+	a.mu.Lock()
+	cancel := a.cancelLogin
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // keep saves a new pair of tokens (the refresh token is spent on use: it is written before anything else).
@@ -239,7 +289,7 @@ func (a *App) connect(ctx context.Context) {
 	}
 	sctx, stop := context.WithCancel(ctx)
 	a.stop = stop
-	s := &stream.Stream{URL: stream.WSURL(a.Server), Tokens: a.token, H: handler{a}, Log: a.log()}
+	s := &stream.Stream{URL: stream.WSURL(a.Server), UserAgent: a.userAgent(), Tokens: a.token, H: handler{a}, Log: a.log()}
 	a.stream = s
 	a.state = Connecting
 	a.mu.Unlock()
@@ -268,7 +318,7 @@ func (a *App) signedOut(why string) {
 		a.stop()
 		a.stop = nil
 	}
-	a.stream, a.secret, a.access, a.user = nil, platform.Secret{}, "", ""
+	a.stream, a.secret, a.access, a.user, a.unsent = nil, platform.Secret{}, "", "", nil
 	a.state, a.lastError = SignedOut, why
 	a.mu.Unlock()
 	platform.DeleteSecret(a.Dir)
@@ -278,14 +328,12 @@ func (a *App) signedOut(why string) {
 
 // Logout ends the session in the CRM and here.
 func (a *App) Logout(ctx context.Context) {
-	a.mu.Lock()
-	access := a.access
-	a.mu.Unlock()
-	if access != "" {
-		lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// through token(): the saved key may have expired, and the session in the CRM must end anyway
+	lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	if access, err := a.token(lctx, false); err == nil {
 		_ = a.api.Logout(lctx, access)
-		cancel()
 	}
+	cancel()
 	a.signedOut("")
 }
 
@@ -348,13 +396,42 @@ func (a *App) Read(ctx context.Context, key string) {
 	if s == nil {
 		return
 	}
-	go func() {
-		rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-		if err := s.Read(rctx, key); err != nil {
-			a.log().Warn("read", "key", key, "err", err)
+	go a.sendRead(ctx, s, key)
+}
+
+// sendRead tells the CRM; when it cannot be reached, the key waits for the next snapshot.
+func (a *App) sendRead(ctx context.Context, s *stream.Stream, key string) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	err := s.Read(ctx, key)
+	if err == nil {
+		return
+	}
+	a.log().Warn("read", "key", key, "err", err)
+	if errors.Is(err, stream.ErrRefused) {
+		return // read elsewhere or no longer there
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stream == s {
+		if a.unsent == nil {
+			a.unsent = map[string]bool{}
 		}
-	}()
+		a.unsent[key] = true
+	}
+}
+
+// sendUnsent repeats the «Прочитано» the CRM did not get. A card that came back holds a message the person has not
+// seen: notify.read would read it too, so its old «Прочитано» is dropped.
+func (a *App) sendUnsent() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for key := range a.unsent {
+		delete(a.unsent, key)
+		if _, back := a.Q.Get(key); !back && a.stream != nil {
+			go a.sendRead(context.Background(), a.stream, key)
+		}
+	}
 }
 
 // Close (×) removes the card here only; a newer message brings it back.
@@ -374,6 +451,18 @@ func (a *App) SetDND(on bool) {
 	a.mu.Unlock()
 	a.Q.SetDND(on)
 	_ = platform.SaveConfig(a.Dir, cfg)
+	a.changed()
+}
+
+// SetPosition chooses where the cards are shown.
+func (a *App) SetPosition(p string) {
+	a.mu.Lock()
+	a.cfg.Position = NormalPosition(p)
+	cfg := a.cfg
+	a.mu.Unlock()
+	if err := platform.SaveConfig(a.Dir, cfg); err != nil {
+		a.log().Warn("save config", "err", err)
+	}
 	a.changed()
 }
 
@@ -414,7 +503,7 @@ func (a *App) play(class string) {
 // handler is the stream.Handler of the app.
 type handler struct{ a *App }
 
-func (h handler) Sync(s api.Snapshot) { h.a.play(h.a.Q.Sync(s)); h.a.changed() }
+func (h handler) Sync(s api.Snapshot) { h.a.Q.Sync(s); h.a.sendUnsent(); h.a.changed() }
 func (h handler) Card(c api.Card)     { h.a.play(h.a.Q.Card(c)); h.a.changed() }
 func (h handler) Clear(keys []string) { h.a.Q.Clear(keys...); h.a.changed() }
 func (h handler) Contract(v string) {

@@ -69,9 +69,9 @@ func TestSyncDropsReadAndKeepsDismissed(t *testing.T) {
 		t.Fatal(keys(m.View()))
 	}
 	// the server still has «a» (not read) — it stays dismissed; «b» was read elsewhere
-	snd := m.Sync(api.Snapshot{Cards: []api.Card{card("a", 1, 1)}, Total: 1})
-	if keys(m.View()) != "" || snd != "" {
-		t.Fatalf("%q %q", keys(m.View()), snd)
+	m.Sync(api.Snapshot{Cards: []api.Card{card("a", 1, 1)}, Total: 1})
+	if keys(m.View()) != "" {
+		t.Fatal(keys(m.View()))
 	}
 	// a newer message in «a» brings it back
 	m.Sync(api.Snapshot{Cards: []api.Card{card("a", 2, 5)}, Total: 1})
@@ -87,16 +87,33 @@ func TestSyncAfterReconnect(t *testing.T) {
 	for i := 20; i >= 1; i-- { // newest first, like the server
 		cards = append(cards, card(fmt.Sprint("n", i), 1, i))
 	}
-	snd := m.Sync(api.Snapshot{Cards: cards, Total: 27})
+	m.Sync(api.Snapshot{Cards: cards, Total: 27})
 	v := m.View()
-	if snd == "" || keys(v) != "n20 n19 n18 " || v.Waiting != 17 || v.More != 7 {
-		t.Fatalf("%q %q waiting %d more %d", snd, keys(v), v.Waiting, v.More)
+	if keys(v) != "n20 n19 n18 " || v.Waiting != 17 || v.More != 7 {
+		t.Fatalf("%q waiting %d more %d", keys(v), v.Waiting, v.More)
 	}
 	if _, ok := m.Get("old"); ok {
 		t.Error("a card the server no longer has is dropped")
 	}
-	if snd := m.Sync(api.Snapshot{Cards: cards, Total: 27}); snd != "" {
-		t.Error("nothing new: no sound")
+}
+
+// The state of the server knows nothing about the cards of the app itself.
+func TestSyncKeepsLocalCards(t *testing.T) {
+	m := New()
+	m.Local(card("update", 0, 1))
+	m.Card(card("a", 1, 2))
+	m.Sync(api.Snapshot{})
+	if keys(m.View()) != "update " {
+		t.Fatal(keys(m.View()))
+	}
+	m.Dismiss("update") // «Позже»
+	m.Sync(api.Snapshot{})
+	if keys(m.View()) != "" {
+		t.Fatal(keys(m.View()))
+	}
+	m.Local(card("update", 0, 3)) // the next daily check
+	if keys(m.View()) != "update " {
+		t.Fatal(keys(m.View()))
 	}
 }
 
