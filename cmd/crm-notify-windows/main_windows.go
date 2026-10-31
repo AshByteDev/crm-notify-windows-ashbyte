@@ -60,7 +60,7 @@ func waitClosed(running bool) bool {
 	return running
 }
 
-// deployed: with update_folder in config.json next to it, the app puts itself and the settings into the profile of the
+// deployed: with a folder in update_source of config.json next to it, the app puts itself and the settings into the profile of the
 // user and starts from there; true — this process has nothing more to do. Otherwise it is an ordinary copy and runs
 // where it is.
 func deployed() bool {

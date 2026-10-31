@@ -86,7 +86,7 @@ type App struct {
 	Device string // the computer name shown in «Мои устройства»
 	P      Platform
 	Exe    string // the running file
-	// Managed: config.json next to the running file (nil — none yet); with UpdateFolder the administrator decides on
+	// Managed: config.json next to the running file (nil — none yet); with UpdateSource the administrator decides on
 	// the updates, without it they come from GitHub.
 	Managed *managed.Config
 	Log     *slog.Logger

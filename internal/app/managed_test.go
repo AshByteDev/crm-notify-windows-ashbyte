@@ -25,7 +25,7 @@ func managedCopy(t *testing.T) (a *App, folder string, replaced *[2]string, quit
 		t.Fatal(err)
 	}
 	replaced, quit = &[2]string{}, new(bool)
-	a = &App{Version: "1", Dir: dir, Exe: exe, Q: queue.New(), Managed: &managed.Config{UpdateFolder: folder},
+	a = &App{Version: "1", Dir: dir, Exe: exe, Q: queue.New(), Managed: &managed.Config{UpdateSource: folder},
 		P: Platform{Replace: func(r, d string) error { replaced[0], replaced[1] = r, d; return nil }}, Quit: func() { *quit = true }}
 	return a, folder, replaced, quit
 }
@@ -70,6 +70,19 @@ func TestFolderStaysWithoutTheField(t *testing.T) {
 	}
 }
 
+// The administrator can send the copies back to GitHub.
+func TestFolderToGitHub(t *testing.T) {
+	a, folder, replaced, _ := managedCopy(t)
+	publish(t, folder, "v2")
+	if err := managed.Save(folder, managed.Config{UpdateSource: managed.GitHubSource}); err != nil {
+		t.Fatal(err)
+	}
+	a.syncFolder(context.Background())
+	if a.View().Managed || replaced[0] != "" {
+		t.Fatalf("%+v %v", a.View(), replaced)
+	}
+}
+
 // The file is written after a portal is checked, and an ordinary copy stays with GitHub.
 func TestConfigAppearsAfterPortal(t *testing.T) {
 	crm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +110,7 @@ func TestConfigAppearsAfterPortal(t *testing.T) {
 	}
 	a.CancelLogin()
 	c, ok, err := managed.Load(home)
-	if !ok || err != nil || c.Server != crm.URL || c.Managed() {
+	if !ok || err != nil || c.Server != crm.URL || c.UpdateSource != managed.GitHubSource || c.Managed() {
 		t.Fatalf("%+v %v %v", c, ok, err)
 	}
 	if v := a.View(); v.Managed || v.FixedServer {
@@ -183,7 +196,7 @@ func TestDisabledRemovesTheApp(t *testing.T) {
 func TestNewSettingsAreCopiedAndChangePortal(t *testing.T) {
 	a, folder, _, _ := managedCopy(t)
 	a.Server = "https://old.example.ru"
-	want := managed.Config{Server: "https://new.example.ru", UpdateFolder: folder}
+	want := managed.Config{Server: "https://new.example.ru", UpdateSource: folder}
 	if err := managed.Save(folder, want); err != nil {
 		t.Fatal(err)
 	}

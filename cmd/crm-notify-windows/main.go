@@ -17,7 +17,7 @@ import (
 var (
 	version = "dev"
 	server  = ""
-	repo    = "AshByteDev/crm-notify-windows-ashbyte" // releases with updates
+	repo    = managed.Repo // releases with updates
 )
 
 // newApp builds the client from the flags and the build settings.

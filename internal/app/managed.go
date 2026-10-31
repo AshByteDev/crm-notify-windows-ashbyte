@@ -28,6 +28,13 @@ func (a *App) followFolder(ctx context.Context) {
 		case <-time.After(wait):
 		}
 		a.syncFolder(ctx)
+		a.mu.Lock()
+		on := a.folder()
+		a.mu.Unlock()
+		if !on { // the administrator has sent the copy back to GitHub
+			a.updates(ctx)
+			return
+		}
 		wait = folderPause()
 	}
 }
@@ -42,7 +49,7 @@ func (a *App) syncFolder(ctx context.Context) {
 	a.mu.Lock()
 	cur := *a.Managed
 	a.mu.Unlock()
-	folder := cur.UpdateFolder
+	folder := cur.UpdateSource
 	c, ok, err := managed.Load(folder)
 	if err != nil {
 		a.log().Info("managed settings", "err", err)
@@ -53,11 +60,14 @@ func (a *App) syncFolder(ctx context.Context) {
 			a.Uninstall(ctx)
 			return
 		}
-		if c.UpdateFolder == "" {
-			c.UpdateFolder = folder // a copy stays managed until it is removed
+		if c.UpdateSource == "" {
+			c.UpdateSource = folder // a copy stays managed until it is removed
 		}
 		if c != cur {
 			a.applyManaged(ctx, c)
+		}
+		if !c.Managed() {
+			return
 		}
 	}
 	want, err := managed.ReadSum(folder)
@@ -104,7 +114,10 @@ func (a *App) keepBeside() {
 	if skip {
 		return
 	}
-	c := managed.Config{Server: server}
+	c := managed.Config{Server: server, UpdateSource: managed.GitHubSource}
+	if have != nil && have.UpdateSource != "" {
+		c.UpdateSource = have.UpdateSource
+	}
 	if err := managed.Save(filepath.Dir(a.Exe), c); err != nil {
 		a.log().Info("config.json", "err", err)
 	}
