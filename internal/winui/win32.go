@@ -51,6 +51,8 @@ var (
 	pCreateIconFromResourceEx      = user32.NewProc("CreateIconFromResourceEx")
 	pDestroyIcon                   = user32.NewProc("DestroyIcon")
 	pTrackMouseEvent               = user32.NewProc("TrackMouseEvent")
+	pSetTimer                      = user32.NewProc("SetTimer")
+	pKillTimer                     = user32.NewProc("KillTimer")
 	pMessageBoxW                   = user32.NewProc("MessageBoxW")
 	pIsDialogMessageW              = user32.NewProc("IsDialogMessageW")
 	pSendMessageW                  = user32.NewProc("SendMessageW")
@@ -90,6 +92,7 @@ const (
 	wmEraseBkgnd     = 0x0014
 	wmSettingChange  = 0x001A
 	wmSetCursor      = 0x0020
+	wmTimer          = 0x0113
 	wmDisplayChange  = 0x007E
 	wmDpiChanged     = 0x02E0
 	wmMouseMove      = 0x0200

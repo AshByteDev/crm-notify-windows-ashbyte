@@ -1,7 +1,8 @@
 //go:build windows
 
-// Package winui is the face of the app on Windows: the tray icon with its menu and up to three cards growing from
-// the bottom of the screen up (docs/APP_SPEC.md §3.1, §3.4). It draws with plain Win32/GDI — no runtime to ship.
+// Package winui is the face of the app on Windows: the tray icon with its menu, up to three cards for a few seconds and
+// a strip with the number of unread ones at the edge of the screen (docs/APP_SPEC.md §3.1, §3.4). It draws with plain
+// Win32/GDI — no runtime to ship.
 package winui
 
 import (
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
@@ -20,14 +22,19 @@ import (
 
 // Logical sizes (scaled by the DPI of the screen).
 const (
-	cardW   = 360
-	cardH   = 116
-	moreH   = 30
-	gap     = 8
-	margin  = 12
-	radius  = 14
-	slotMax = queue.Max + 1 // three cards and the «ещё N» strip
+	cardW    = 360
+	cardH    = 76  // the line of the sender and two lines of the message
+	serviceH = 116 // the cards with worded buttons
+	moreH    = 30
+	iconSize = 24
+	gap      = 8
+	margin   = 12
+	radius   = 14
+	slotMax  = queue.Max + 1 // three cards and the strip of the unread
 )
+
+// timerHide wakes the UI when the next card must leave the screen.
+const timerHide = 1
 
 // menu commands
 const (
@@ -55,7 +62,7 @@ const (
 	hitLogin
 )
 
-// slot is one window of the stack: a card, the «sign in» card or the «ещё N» strip.
+// slot is one window of the stack: a card, the «sign in» card or the strip of the unread.
 type slot struct {
 	hwnd  uintptr
 	card  api.Card
@@ -226,7 +233,7 @@ func (u *UI) iconFor(v app.View) (string, uintptr) {
 	default:
 		key = "on"
 	}
-	if len(v.Queue.Visible)+v.Queue.Waiting > 0 {
+	if v.Queue.Unread > 0 {
 		key += "-dot"
 	}
 	size := int(16*u.scale + 0.5)
@@ -269,7 +276,7 @@ func tipOf(v app.View) string {
 	default:
 		s += "войдите в приложение"
 	}
-	if n := len(v.Queue.Visible) + v.Queue.Waiting; n > 0 {
+	if n := v.Queue.Unread; n > 0 {
 		s += fmt.Sprintf(" · уведомлений: %d", n)
 	}
 	return s
@@ -319,6 +326,13 @@ func (u *UI) trayProc(hwnd, m, wp, lp uintptr) uintptr {
 		return 0
 	case wmPortalDone:
 		u.portalDone()
+		return 0
+	case wmTimer:
+		if wp == timerHide {
+			pKillTimer.Call(u.tray, timerHide)
+			u.A.Q.Tick(time.Now())
+			u.refresh()
+		}
 		return 0
 	case wmPowerBroadcast:
 		if wp == pbtResumeAutomatic {
@@ -447,7 +461,8 @@ func (u *UI) menu() {
 
 // ---- the stack of cards ----
 
-// refresh redraws the tray and puts the cards in their places (the newest at the edge of the screen).
+// refresh redraws the tray and puts the windows in their places: the strip at the edge of the screen, then the cards,
+// the newest closest to it.
 func (u *UI) refresh() {
 	rescaled := u.syncScale()
 	v := u.A.View()
@@ -461,6 +476,9 @@ func (u *UI) refresh() {
 		card       api.Card
 	}
 	var list []want
+	if t := stripText(v.Queue); t != "" {
+		list = append(list, want{kind: "more", text: t})
+	}
 	if v.State == app.NeedServer {
 		if !u.portalAsked {
 			u.portalAsked = true
@@ -477,23 +495,18 @@ func (u *UI) refresh() {
 	for _, c := range v.Queue.Visible {
 		list = append(list, want{kind: "card", card: c})
 	}
-	if n := v.Queue.Waiting + v.Queue.More; n > 0 && len(v.Queue.Visible) > 0 {
-		t := fmt.Sprintf("Ещё %d %s", n, plural(n, "уведомление", "уведомления", "уведомлений"))
-		if v.Queue.DND {
-			t += " · не беспокоить"
-		}
-		list = append(list, want{kind: "more", text: t + " — открыть AshCRM"})
-	} else if v.Queue.DND && v.Queue.Waiting > 0 {
-		list = append(list, want{kind: "more", text: fmt.Sprintf("Не беспокоить · ждут %d", v.Queue.Waiting)})
-	}
 
 	var wa rect
 	pSystemParametersInfoW.Call(spiGetWorkArea, 0, ptr(&wa), 0)
 	heights := make([]int32, len(list))
 	for i, w := range list {
-		heights[i] = u.pi(cardH)
-		if w.kind == "more" {
+		switch {
+		case w.kind == "more":
 			heights[i] = u.pi(moreH)
+		case w.kind == "signin" || w.card.Key == app.UpdateKey:
+			heights[i] = u.pi(serviceH)
+		default:
+			heights[i] = u.pi(cardH)
 		}
 	}
 	places := stack(v.Position, wa, u.pi(cardW), heights, u.pi(margin), u.pi(gap))
@@ -519,25 +532,33 @@ func (u *UI) refresh() {
 			pInvalidateRect.Call(s.hwnd, 0, 0)
 		}
 	}
+	u.armTimer(v.Queue.Next)
 }
 
-func plural(n int, one, few, many string) string {
-	n %= 100
-	if n >= 11 && n <= 14 {
-		return many
+// armTimer wakes the UI when the next card must go (a zero time — no card is timed).
+func (u *UI) armTimer(at time.Time) {
+	if at.IsZero() {
+		pKillTimer.Call(u.tray, timerHide)
+		return
 	}
-	switch n % 10 {
-	case 1:
-		return one
-	case 2, 3, 4:
-		return few
-	}
-	return many
+	ms := max(time.Until(at).Milliseconds()+1, 1)
+	pSetTimer.Call(u.tray, timerHide, uintptr(ms), 0)
 }
+
+// service: a card of the app that needs a decision: it keeps its worded buttons and its size.
+func service(s *slot) bool { return s.kind == "signin" || s.card.Key == app.UpdateKey }
 
 // geometry of a card (client coordinates)
 func (u *UI) buttons(s *slot) (open, read, close rect) {
-	w, h := u.pi(cardW), u.pi(cardH)
+	w := u.pi(cardW)
+	if !service(s) { // the icons of the first line: «Прочитано», «Открыть», «✕»
+		size, top, step := u.pi(iconSize), u.pi(6), u.pi(iconSize+2)
+		close = rect{w - u.pi(8) - size, top, w - u.pi(8), top + size}
+		open = rect{close.Left - step, top, close.Right - step, top + size}
+		read = rect{open.Left - step, top, open.Right - step, top + size}
+		return
+	}
+	h := u.pi(serviceH)
 	bh, bw := u.pi(26), u.pi(96)
 	read = rect{w - u.pi(14) - bw, h - u.pi(12) - bh, w - u.pi(14), h - u.pi(12)}
 	open = rect{read.Left - u.pi(8) - bw, read.Top, read.Left - u.pi(8), read.Bottom}
@@ -587,9 +608,15 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 			t := trackMouseEvent{Flags: tmeLeave, Track: hwnd}
 			t.Size = uint32(unsafe.Sizeof(t))
 			pTrackMouseEvent.Call(ptr(&t))
+			if s.kind == "card" && u.A.Q.Hold(s.card.Key, true) {
+				u.refresh()
+			}
 		}
 		return 0
 	case wmMouseLeave:
+		if s != nil && s.kind == "card" && u.A.Q.Hold(s.card.Key, false) {
+			u.refresh()
+		}
 		if s != nil && s.hover != hitNone {
 			s.hover = hitNone
 			pInvalidateRect.Call(hwnd, 0, 0)
@@ -658,16 +685,23 @@ var (
 )
 
 func (u *UI) font(size int, bold bool) uintptr {
-	key := fmt.Sprint(size, bold, u.scale)
-	if f, ok := u.fonts[key]; ok {
-		return f
-	}
 	weight := 400
 	if bold {
 		weight = 600
 	}
+	return u.fontOf("Segoe UI", size, weight)
+}
+
+// symbolFont has the glyphs of the icons on every Windows 10/11.
+func (u *UI) symbolFont(size int) uintptr { return u.fontOf("Segoe UI Symbol", size, 400) }
+
+func (u *UI) fontOf(family string, size, weight int) uintptr {
+	key := fmt.Sprint(family, size, weight, u.scale)
+	if f, ok := u.fonts[key]; ok {
+		return f
+	}
 	f, _, _ := pCreateFontW.Call(uintptr(-u.pi(size)), 0, 0, 0, uintptr(weight), 0, 0, 0, 1, 0, 0, 5, 0,
-		uintptr(unsafe.Pointer(utf16("Segoe UI"))))
+		uintptr(unsafe.Pointer(utf16(family))))
 	u.fonts[key] = f
 	return f
 }
@@ -741,59 +775,79 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 	if s.kind == "more" {
 		p.fill(cr, colMoreBg)
 		p.text(s.text, rect{u.pi(14), 0, w - u.pi(14), h}, u.font(12, false), colWhite, dtSingleLine|dtVCenter|dtEndEllipsis|dtCenter)
-	} else {
-		p.round(rect{0, 0, w, h}, colBg, colBorder, u.pi(radius))
-		bar := accent(s.card)
-		title, body := s.card.Title, s.card.Body
-		if s.kind == "signin" {
-			bar, title, body = colBlue, "AshCRM Notify", "Войдите, чтобы получать уведомления о сообщениях и беседах."
-			if s.text != "" {
-				body = s.text
-			}
-		}
-		p.fill(rect{0, u.pi(10), u.pi(4), h - u.pi(10)}, bar)
-		left := u.pi(18)
-		p.text(title, rect{left, u.pi(12), w - u.pi(38), u.pi(34)}, u.font(14, true), colTitle, dtSingleLine|dtEndEllipsis)
-		p.text(body, rect{left, u.pi(36), w - u.pi(16), u.pi(74)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
-		open, read, cl := u.buttons(s)
-		// ×
-		xc := colMuted
-		if s.hover == hitClose {
-			p.round(cl, colBtnHov, colBtnHov, u.pi(8))
-			xc = colTitle
-		}
-		p.text("✕", cl, u.font(12, false), xc, dtSingleLine|dtVCenter|dtCenter)
-		if s.kind == "signin" {
-			bg := colBlue
-			if s.hover == hitLogin {
-				bg = colBlueHov
-			}
-			p.round(read, bg, bg, u.pi(8))
-			p.text("Войти", read, u.font(13, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
-		} else {
-			if s.card.Count > 1 {
-				p.text(fmt.Sprintf("%d %s", s.card.Count, plural(s.card.Count, "непрочитанное", "непрочитанных", "непрочитанных")),
-					rect{left, open.Top, open.Left - u.pi(6), open.Bottom}, u.font(12, false), colMuted, dtSingleLine|dtVCenter|dtEndEllipsis)
-			}
-			ob := colBtn
-			if s.hover == hitOpen {
-				ob = colBtnHov
-			}
-			openLabel, label := "Открыть", "Прочитано"
-			if s.card.Key == app.UpdateKey {
-				openLabel, label = "Позже", "Обновить"
-				if u.A.View().Updating {
-					label = "Обновляю…"
-				}
-			}
-			p.round(open, ob, ob, u.pi(8))
-			p.text(openLabel, open, u.font(13, false), colTitle, dtSingleLine|dtVCenter|dtCenter)
-			rb := colBlue
-			if s.hover == hitRead {
-				rb = colBlueHov
-			}
-			p.round(read, rb, rb, u.pi(8))
-			p.text(label, read, u.font(13, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
+		return
+	}
+	p.round(rect{0, 0, w, h}, colBg, colBorder, u.pi(radius))
+	if service(s) {
+		u.drawService(p, s, w, h)
+		return
+	}
+	p.fill(rect{0, u.pi(10), u.pi(4), h - u.pi(10)}, accent(s.card))
+	open, read, cl := u.buttons(s)
+	left := u.pi(14)
+	if t := clock(s.card.At); t != "" {
+		p.text(t, rect{left, 0, left + u.pi(38), u.pi(36)}, u.font(12, false), colMuted, dtSingleLine|dtVCenter)
+		left += u.pi(42)
+	}
+	p.text(cardTitle(s.card), rect{left, 0, read.Left - u.pi(4), u.pi(36)}, u.font(13, true), colTitle, dtSingleLine|dtVCenter|dtEndEllipsis)
+	p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(70)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
+	u.icon(p, s, read, "✓", hitRead, colBlue)
+	u.icon(p, s, open, "↗", hitOpen, colBody)
+	u.icon(p, s, cl, "✕", hitClose, colMuted)
+}
+
+// icon is a button of the first line of a card.
+func (u *UI) icon(p painter, s *slot, r rect, glyph string, hit int, color uintptr) {
+	if s.hover == hit {
+		p.round(r, colBtnHov, colBtnHov, u.pi(8))
+		color = colTitle
+	}
+	p.text(glyph, r, u.symbolFont(14), color, dtSingleLine|dtVCenter|dtCenter)
+}
+
+// drawService is the card «Войдите» or «Доступна версия»: a decision, so its buttons are in words.
+func (u *UI) drawService(p painter, s *slot, w, h int32) {
+	title, body := s.card.Title, s.card.Body
+	if s.kind == "signin" {
+		title, body = "AshCRM Notify", "Войдите, чтобы получать уведомления о сообщениях и беседах."
+		if s.text != "" {
+			body = s.text
 		}
 	}
+	p.fill(rect{0, u.pi(10), u.pi(4), h - u.pi(10)}, colBlue)
+	left := u.pi(18)
+	p.text(title, rect{left, u.pi(12), w - u.pi(38), u.pi(34)}, u.font(14, true), colTitle, dtSingleLine|dtEndEllipsis)
+	p.text(body, rect{left, u.pi(36), w - u.pi(16), u.pi(74)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
+	open, read, cl := u.buttons(s)
+	xc := colMuted
+	if s.hover == hitClose {
+		p.round(cl, colBtnHov, colBtnHov, u.pi(8))
+		xc = colTitle
+	}
+	p.text("✕", cl, u.font(12, false), xc, dtSingleLine|dtVCenter|dtCenter)
+	if s.kind == "signin" {
+		bg := colBlue
+		if s.hover == hitLogin {
+			bg = colBlueHov
+		}
+		p.round(read, bg, bg, u.pi(8))
+		p.text("Войти", read, u.font(13, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
+		return
+	}
+	ob := colBtn
+	if s.hover == hitOpen {
+		ob = colBtnHov
+	}
+	label := "Обновить"
+	if u.A.View().Updating {
+		label = "Обновляю…"
+	}
+	p.round(open, ob, ob, u.pi(8))
+	p.text("Позже", open, u.font(13, false), colTitle, dtSingleLine|dtVCenter|dtCenter)
+	rb := colBlue
+	if s.hover == hitRead {
+		rb = colBlueHov
+	}
+	p.round(read, rb, rb, u.pi(8))
+	p.text(label, read, u.font(13, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
 }

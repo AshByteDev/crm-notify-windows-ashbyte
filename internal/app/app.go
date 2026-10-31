@@ -31,7 +31,7 @@ const (
 )
 
 // Contract is the version of docs/NOTIFY_CONTRACT.md the app speaks; a CRM with another major version needs another app.
-const Contract = "1.0"
+const Contract = "1.1"
 
 // Places of the cards on the screen (the setting «Где показывать уведомления»).
 const (
@@ -473,7 +473,7 @@ func (a *App) TestNotify(ctx context.Context) {
 	if dnd {
 		text += " Включено «Не беспокоить»: карточка появится после выключения."
 	}
-	a.Q.Local(api.Card{Key: TestKey, Kind: "test", Title: "Проверка уведомлений", Body: text, URL: "/team", At: time.Now(), Sound: api.SoundOther})
+	a.Q.Local(api.Card{Key: TestKey, Kind: queue.KindTest, Title: "Проверка уведомлений", Body: text, URL: "/team", At: time.Now(), Sound: api.SoundOther})
 	if a.P.PlaySound != nil {
 		a.P.PlaySound(api.SoundOther)
 	}
