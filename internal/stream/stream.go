@@ -391,6 +391,20 @@ func (s *Stream) request(ctx context.Context, typ string, data any) (frame, erro
 	}
 }
 
+// Check asks the CRM for the current state through the live socket, without applying it: the whole way to the account
+// and back works when it answers.
+func (s *Stream) Check(ctx context.Context) (api.Snapshot, error) {
+	var sn api.Snapshot
+	f, err := s.request(ctx, "notify.snapshot", nil)
+	if err != nil {
+		return sn, err
+	}
+	if f.Error != nil {
+		return sn, fmt.Errorf("%w: %s", ErrRefused, f.Error.Message)
+	}
+	return sn, json.Unmarshal(f.Data, &sn)
+}
+
 // Read sends «Прочитано» for a card.
 func (s *Stream) Read(ctx context.Context, key string) error {
 	f, err := s.request(ctx, "notify.read", map[string]string{"key": key})

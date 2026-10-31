@@ -3,15 +3,19 @@
 package winui
 
 import (
+	"strings"
 	"syscall"
 	"unsafe"
 )
 
-// «Настройки»: a picture of a monitor; a click on a part of its screen chooses where the cards are shown, at once.
+// «Настройки»: a picture of a monitor, where a click on a part of its screen chooses the place of the cards at once,
+// and the check of the whole way: the account, the CRM, a card, a sound.
 
 const (
 	settingsW = 440
-	settingsH = 344
+	settingsH = 432
+
+	hitTest = "test" // the button of the check (the other hits are places of the cards)
 )
 
 var (
@@ -53,6 +57,20 @@ func (u *UI) monitor() (body, screen rect) {
 	return body, rect{body.Left + b, body.Top + b, body.Right - b, body.Bottom - b}
 }
 
+func (u *UI) testButton() rect {
+	mid := u.pi(settingsW) / 2
+	return rect{mid - u.pi(120), u.pi(336), mid + u.pi(120), u.pi(368)}
+}
+
+// settingsHit is what lies under the mouse: a place of the cards, the button or nothing.
+func (u *UI) settingsHit(x, y int32) string {
+	if in(u.testButton(), x, y) {
+		return hitTest
+	}
+	_, screen := u.monitor()
+	return zoneAt(screen, x, y)
+}
+
 func (u *UI) settingsProc(hwnd, m, wp, lp uintptr) uintptr {
 	switch uint32(m) {
 	case wmPaint:
@@ -61,8 +79,7 @@ func (u *UI) settingsProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmEraseBkgnd:
 		return 1 // the whole window is painted at once, without flicker
 	case wmMouseMove:
-		_, screen := u.monitor()
-		if z := zoneAt(screen, loword(lp), hiword(lp)); z != u.settings.hover {
+		if z := u.settingsHit(loword(lp), hiword(lp)); z != u.settings.hover {
 			u.settings.hover = z
 			pInvalidateRect.Call(hwnd, 0, 0)
 		}
@@ -81,8 +98,11 @@ func (u *UI) settingsProc(hwnd, m, wp, lp uintptr) uintptr {
 			return 1
 		}
 	case wmLButtonUp:
-		_, screen := u.monitor()
-		if z := zoneAt(screen, loword(lp), hiword(lp)); z != "" {
+		switch z := u.settingsHit(loword(lp), hiword(lp)); z {
+		case "":
+		case hitTest:
+			go u.A.TestNotify(u.Ctx)
+		default:
 			u.A.SetPosition(z)
 			pInvalidateRect.Call(hwnd, 0, 0)
 		}
@@ -97,7 +117,8 @@ func (u *UI) settingsProc(hwnd, m, wp, lp uintptr) uintptr {
 }
 
 func (u *UI) drawSettings(p painter, cr rect) {
-	chosen := u.A.View().Position
+	v := u.A.View()
+	chosen := v.Position
 	p.fill(cr, colBg)
 	left, right := u.pi(20), cr.Right-u.pi(20)
 	p.text("Где показывать уведомления", rect{left, u.pi(14), right, u.pi(38)}, u.font(15, true), colTitle, dtSingleLine|dtVCenter)
@@ -129,4 +150,16 @@ func (u *UI) drawSettings(p painter, cr rect) {
 		}
 	}
 	p.text("Уведомления: "+zoneName(chosen), rect{left, u.pi(304), right, u.pi(328)}, u.font(13, false), colBody, dtSingleLine|dtVCenter|dtCenter)
+
+	btn, bg := u.testButton(), colBlue
+	if u.settings.hover == hitTest {
+		bg = colBlueHov
+	}
+	p.round(btn, bg, bg, u.pi(8))
+	p.text("Проверить уведомления", btn, u.font(13, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
+	result := v.Test
+	if strings.TrimSpace(result) == "" {
+		result = "Покажет карточку со звуком и сотрудника, которому приходят уведомления."
+	}
+	p.text(result, rect{left, u.pi(376), right, u.pi(424)}, u.font(12, false), colBody, dtCenter|dtWordBreak|dtEndEllipsis|dtEditControl)
 }
