@@ -52,6 +52,71 @@ func TestFolderUpdate(t *testing.T) {
 	if b, _ := os.ReadFile(replaced[1]); string(b) != "v2" {
 		t.Fatal(string(b))
 	}
+	want, _ := managed.ReadSum(folder)
+	if got, err := managed.ReadSum(filepath.Dir(a.Exe)); err != nil || got != want {
+		t.Fatal("the sum goes with the file", got, err)
+	}
+}
+
+// The administrator's file may name only what changes: the copy stays where it is managed from.
+func TestFolderStaysWithoutTheField(t *testing.T) {
+	a, folder, _, _ := managedCopy(t)
+	if err := managed.Save(folder, managed.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	a.syncFolder(context.Background())
+	if !a.View().Managed {
+		t.Fatal("the copy left the folder")
+	}
+}
+
+// The file is written after a portal is checked, and an ordinary copy stays with GitHub.
+func TestConfigAppearsAfterPortal(t *testing.T) {
+	crm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte(`{"error":{"code":"unauthorized"}}`))
+	}))
+	defer crm.Close()
+	home := t.TempDir()
+	a := &App{Version: "1", Dir: t.TempDir(), Exe: filepath.Join(home, managed.ExeName),
+		P: Platform{OpenURL: func(string) error { return nil }}}
+	a.Load()
+	if _, ok, _ := managed.Load(home); ok {
+		t.Fatal("no portal yet")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := a.SetServer(ctx, "http://127.0.0.1:1"); err == nil {
+		t.Fatal("an unreachable portal is accepted")
+	}
+	if _, ok, _ := managed.Load(home); ok {
+		t.Fatal("a failed check writes nothing")
+	}
+	if err := a.SetServer(ctx, crm.URL); err != nil {
+		t.Fatal(err)
+	}
+	a.CancelLogin()
+	c, ok, err := managed.Load(home)
+	if !ok || err != nil || c.Server != crm.URL || c.Managed() {
+		t.Fatalf("%+v %v %v", c, ok, err)
+	}
+	if v := a.View(); v.Managed || v.FixedServer {
+		t.Fatalf("%+v", v)
+	}
+}
+
+// A saved portal from an earlier version gets its file on the next start.
+func TestConfigAppearsForSavedPortal(t *testing.T) {
+	home, dir := t.TempDir(), t.TempDir()
+	if err := platform.SaveConfig(dir, platform.Config{Server: "https://crm.example.ru"}); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Version: "1", Dir: dir, Exe: filepath.Join(home, managed.ExeName)}
+	a.Load()
+	a.keepBeside()
+	if c, ok, _ := managed.Load(home); !ok || c.Server != "https://crm.example.ru" {
+		t.Fatalf("%+v", c)
+	}
 }
 
 // The same file means nothing to do; a file that is still being copied waits for the next check.

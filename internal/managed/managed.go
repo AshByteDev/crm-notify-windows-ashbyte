@@ -1,6 +1,6 @@
-// Package managed is the part of the app an administrator controls: a folder with the .exe, its .sha256 and a file of
-// settings. Started from such a folder, the app copies itself into the profile of the user and later follows the
-// folder (docs/APP_SPEC.md §7). It knows nothing of windows and is tested on any system.
+// Package managed is config.json next to the .exe and the part of the app an administrator controls. The file names
+// the portal; with update_folder the copy is managed: started from that folder, the app copies itself into the profile
+// of the user and later follows it (docs/APP_SPEC.md §7). It knows nothing of windows and is tested on any system.
 package managed
 
 import (
@@ -20,18 +20,18 @@ import (
 const (
 	// ExeName is the file of the app, in a release and in the folder of the administrator.
 	ExeName = "AshCRM-Notify.exe"
-	// ConfigName is the file of the administrator next to the .exe.
-	ConfigName = "AshCRM-Notify.json"
+	// ConfigName is the file of settings next to the .exe.
+	ConfigName = "config.json"
 	// NextName is the new version while it is being copied.
 	NextName = "AshCRM-Notify.new.exe"
 
 	maxExe = 100 << 20 // bigger is not the app
 )
 
-// Config is the file of the administrator. Its presence is what makes the app managed.
+// Config is config.json. The app writes one with the portal by itself, so the file alone means nothing more.
 type Config struct {
 	Server string `json:"server,omitempty"`
-	// UpdateFolder is where the updates come from (empty in the file — the folder of the file itself).
+	// UpdateFolder is the folder of the administrator: only this field makes the copy managed (empty — GitHub).
 	UpdateFolder string `json:"update_folder,omitempty"`
 	// Disabled removes the app from every profile.
 	Disabled bool `json:"disabled,omitempty"`
@@ -50,9 +50,6 @@ func Load(dir string) (c Config, ok bool, err error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return Config{}, false, fmt.Errorf("%s: %w", ConfigName, err)
 	}
-	if c.UpdateFolder == "" {
-		c.UpdateFolder = dir
-	}
 	return c, true, nil
 }
 
@@ -64,6 +61,14 @@ func Save(dir string, c Config) error {
 		return err
 	}
 	return os.Rename(tmp, filepath.Join(dir, ConfigName))
+}
+
+// Managed: the administrator decides on the updates of this copy.
+func (c Config) Managed() bool { return c.UpdateFolder != "" }
+
+// SaveSum writes the .sha256 next to the file. It is for the people: the app never trusts it, it counts its own sum.
+func SaveSum(dir, sum string) error {
+	return os.WriteFile(filepath.Join(dir, ExeName+".sha256"), []byte(sum+"  "+ExeName+"\n"), 0o644)
 }
 
 // Sum is the SHA-256 of a file.
@@ -149,6 +154,9 @@ func Install(exe string, c Config, home string) (changed bool, err error) {
 			return false, err
 		}
 		changed = true
+	}
+	if err := SaveSum(home, sum); err != nil {
+		return false, err
 	}
 	if have, ok, err := Load(home); err != nil || !ok || have != c {
 		if err := Save(home, c); err != nil {

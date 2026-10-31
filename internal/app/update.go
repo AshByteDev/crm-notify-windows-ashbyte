@@ -142,7 +142,10 @@ func (a *App) latest(ctx context.Context) (*Release, error) {
 
 // CheckUpdate looks for a newer release now (the menu «Проверить обновления») and shows its card.
 func (a *App) CheckUpdate(ctx context.Context) (*Release, error) {
-	if a.Managed != nil { // never past the administrator, a contract mismatch included
+	a.mu.Lock()
+	managedCopy := a.folder()
+	a.mu.Unlock()
+	if managedCopy { // never past the administrator, a contract mismatch included
 		a.syncFolder(ctx)
 		return nil, nil
 	}
@@ -257,5 +260,11 @@ func (a *App) install(ctx context.Context, r *Release) error {
 		_ = os.Remove(next)
 		return errors.New("контрольная сумма не совпала — файл не установлен")
 	}
-	return a.P.Replace(exe, next)
+	if err := a.P.Replace(exe, next); err != nil {
+		return err
+	}
+	if err := managed.SaveSum(filepath.Dir(exe), r.SHA256); err != nil {
+		a.log().Info("save sha256", "err", err)
+	}
+	return nil
 }

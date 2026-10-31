@@ -60,9 +60,9 @@ func waitClosed(running bool) bool {
 	return running
 }
 
-// deployed: started from the folder of the administrator, the app puts itself and the settings into the profile of the
-// user and starts from there; true — this process has nothing more to do. Without the file of the administrator it is
-// an ordinary copy and runs where it is.
+// deployed: with update_folder in config.json next to it, the app puts itself and the settings into the profile of the
+// user and starts from there; true — this process has nothing more to do. Otherwise it is an ordinary copy and runs
+// where it is.
 func deployed() bool {
 	exe, err := os.Executable()
 	if err != nil {
@@ -77,7 +77,7 @@ func deployed() bool {
 		winui.Message("Не удалось прочитать настройки администратора: " + err.Error())
 		return true
 	}
-	if !ok {
+	if !ok || !c.Managed() {
 		return false
 	}
 	if c.Disabled {

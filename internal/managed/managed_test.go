@@ -21,7 +21,7 @@ func TestLoad(t *testing.T) {
 	}
 	write(t, filepath.Join(dir, ConfigName), "\xef\xbb\xbf"+`{"server":"https://crm.example.ru"}`)
 	c, ok, err := Load(dir)
-	if !ok || err != nil || c.Server != "https://crm.example.ru" || c.UpdateFolder != dir {
+	if !ok || err != nil || c.Server != "https://crm.example.ru" || c.Managed() {
 		t.Fatalf("%+v %v %v", c, ok, err)
 	}
 	write(t, filepath.Join(dir, ConfigName), "{")
@@ -69,6 +69,10 @@ func TestInstall(t *testing.T) {
 	c := Config{Server: "https://crm.example.ru", UpdateFolder: src}
 	if changed, err := Install(exe, c, home); !changed || err != nil {
 		t.Fatal(changed, err)
+	}
+	sum, _ := Sum(exe)
+	if got, err := ReadSum(home); err != nil || got != sum {
+		t.Fatal("the sum goes with the file", got, err)
 	}
 	if got, ok, _ := Load(home); !ok || got != c {
 		t.Fatalf("%+v", got)

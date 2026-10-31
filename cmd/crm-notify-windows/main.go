@@ -46,10 +46,10 @@ func newApp() (*app.App, error) {
 		return nil, err
 	}
 	log := logger(dir)
-	var settings *managed.Config // the file of the administrator next to the running copy
+	var settings *managed.Config // config.json next to the running copy
 	if c, ok, err := managed.Load(filepath.Dir(exe)); err != nil {
 		log.Warn("managed settings", "err", err)
-	} else if ok {
+	} else if ok && (*srv == "" || c.Managed()) { // an explicit portal outranks the file of an ordinary copy
 		settings = &c
 	}
 	return &app.App{DefaultServer: server, Version: version, Repo: repo, Dir: dir, Device: app.DeviceName(), Exe: exe,

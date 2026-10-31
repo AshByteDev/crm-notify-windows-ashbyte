@@ -53,6 +53,9 @@ func (a *App) syncFolder(ctx context.Context) {
 			a.Uninstall(ctx)
 			return
 		}
+		if c.UpdateFolder == "" {
+			c.UpdateFolder = folder // a copy stays managed until it is removed
+		}
 		if c != cur {
 			a.applyManaged(ctx, c)
 		}
@@ -83,9 +86,31 @@ func (a *App) syncFolder(ctx context.Context) {
 		a.log().Warn("managed update", "err", err)
 		return
 	}
+	if err := managed.SaveSum(filepath.Dir(a.Exe), want); err != nil {
+		a.log().Info("save sha256", "err", err)
+	}
 	if a.Quit != nil {
 		a.Quit()
 	}
+}
+
+// keepBeside writes the portal into config.json next to the app. The folder may be closed for writing (the app then
+// works without the file): that is not an error.
+func (a *App) keepBeside() {
+	a.mu.Lock()
+	server, have := a.Server, a.Managed
+	skip := a.folder() || a.Exe == "" || server == "" || (have != nil && have.Server == server)
+	a.mu.Unlock()
+	if skip {
+		return
+	}
+	c := managed.Config{Server: server}
+	if err := managed.Save(filepath.Dir(a.Exe), c); err != nil {
+		a.log().Info("config.json", "err", err)
+	}
+	a.mu.Lock()
+	a.Managed = &c
+	a.mu.Unlock()
 }
 
 // applyManaged keeps the new settings of the administrator; another portal means another account.

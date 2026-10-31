@@ -93,6 +93,7 @@ func (a *App) SetServer(ctx context.Context, raw string) error {
 	if err := platform.SaveConfig(a.Dir, cfg); err != nil {
 		return err
 	}
+	a.keepBeside()
 	a.changed()
 	a.Login(ctx)
 	return nil

@@ -86,7 +86,8 @@ type App struct {
 	Device string // the computer name shown in «Мои устройства»
 	P      Platform
 	Exe    string // the running file
-	// Managed: the settings of the administrator; nil — an ordinary copy, updates from GitHub.
+	// Managed: config.json next to the running file (nil — none yet); with UpdateFolder the administrator decides on
+	// the updates, without it they come from GitHub.
 	Managed *managed.Config
 	Log     *slog.Logger
 	// Changed asks the UI to redraw (called from any goroutine).
@@ -158,10 +159,11 @@ func (a *App) changed() {
 // Start loads the settings and connects when a session is saved.
 func (a *App) Start(ctx context.Context) {
 	a.Load()
+	a.keepBeside()
 	if a.secret.RefreshToken != "" {
 		a.connect(ctx)
 	}
-	if a.Managed != nil {
+	if a.folder() {
 		go a.followFolder(ctx)
 	} else {
 		go a.updates(ctx)
@@ -186,7 +188,10 @@ func (a *App) Load() {
 	}
 }
 
-// adoptManagedServer: the portal of the administrator wins; the session of another portal is of no use.
+// folder: the copy follows the folder of the administrator (call under a.mu once goroutines are running).
+func (a *App) folder() bool { return a.Managed != nil && a.Managed.Managed() }
+
+// adoptManagedServer: the portal of config.json wins; the session of another portal is of no use.
 func (a *App) adoptManagedServer() {
 	if a.Managed == nil || a.Managed.Server == "" {
 		return
@@ -211,8 +216,8 @@ func (a *App) View() View {
 	defer a.mu.Unlock()
 	v := View{State: a.state, User: a.user, Error: a.lastError, DND: a.cfg.DND, CheckUpdates: a.cfg.CheckUpdates,
 		Version: a.Version, Server: a.Server, DefaultServer: a.DefaultServer, Update: a.update, Updating: a.updating,
-		Position: NormalPosition(a.cfg.Position), Test: a.testing, Managed: a.Managed != nil,
-		FixedServer: a.Managed != nil && a.Managed.Server != ""}
+		Position: NormalPosition(a.cfg.Position), Test: a.testing, Managed: a.folder(),
+		FixedServer: a.folder() && a.Managed.Server != ""}
 	if a.Q != nil {
 		v.Queue = a.Q.View()
 	}
