@@ -15,6 +15,7 @@ import (
 
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/login"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/managed"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/platform"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/queue"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/stream"
@@ -69,6 +70,8 @@ type Platform struct {
 	SetAutostart func(bool) error
 	// Replace puts the downloaded file in place of the running one and starts it (nil — not supported here).
 	Replace func(running, downloaded string) error
+	// Uninstall removes the app from the profile of the user (nil — not supported here).
+	Uninstall func() error
 }
 
 // App is the whole client.
@@ -82,7 +85,10 @@ type App struct {
 	Dir    string // settings and the protected session
 	Device string // the computer name shown in «Мои устройства»
 	P      Platform
-	Log    *slog.Logger
+	Exe    string // the running file
+	// Managed: the settings of the administrator; nil — an ordinary copy, updates from GitHub.
+	Managed *managed.Config
+	Log     *slog.Logger
 	// Changed asks the UI to redraw (called from any goroutine).
 	Changed func()
 	// Quit closes the app (after an update the new copy starts).
@@ -103,6 +109,8 @@ type App struct {
 	stop      context.CancelFunc
 	lastSound time.Time
 	refreshMu sync.Mutex
+	syncing   sync.Mutex // one look at the folder of the administrator at a time
+	paused    bool       // the person left the session of Windows
 	update    *Release
 	updating  bool
 	testing   string // the result of the last check in the settings
@@ -117,6 +125,8 @@ type View struct {
 	State         string
 	DefaultServer string
 	Update        *Release // a newer version on GitHub
+	Managed       bool     // the administrator decides on the updates
+	FixedServer   bool     // the administrator has set the portal
 	Updating      bool
 	User          string
 	Error         string
@@ -147,7 +157,22 @@ func (a *App) changed() {
 
 // Start loads the settings and connects when a session is saved.
 func (a *App) Start(ctx context.Context) {
+	a.Load()
+	if a.secret.RefreshToken != "" {
+		a.connect(ctx)
+	}
+	if a.Managed != nil {
+		go a.followFolder(ctx)
+	} else {
+		go a.updates(ctx)
+	}
+	a.changed()
+}
+
+// Load reads the settings and the saved session, without connecting.
+func (a *App) Load() {
 	a.cfg = platform.LoadConfig(a.Dir)
+	a.adoptManagedServer()
 	a.Server = a.cfg.Server
 	a.Q = queue.New()
 	a.Q.SetDND(a.cfg.DND)
@@ -157,11 +182,27 @@ func (a *App) Start(ctx context.Context) {
 		a.state = SignedOut
 		if s, ok := platform.LoadSecret(a.Dir); ok {
 			a.secret = s
-			a.connect(ctx)
 		}
 	}
-	go a.updates(ctx)
-	a.changed()
+}
+
+// adoptManagedServer: the portal of the administrator wins; the session of another portal is of no use.
+func (a *App) adoptManagedServer() {
+	if a.Managed == nil || a.Managed.Server == "" {
+		return
+	}
+	s, err := NormalizeServer(a.Managed.Server)
+	if err != nil {
+		a.log().Warn("managed portal", "err", err)
+		return
+	}
+	if s != a.cfg.Server {
+		a.cfg.Server = s
+		platform.DeleteSecret(a.Dir)
+		if err := platform.SaveConfig(a.Dir, a.cfg); err != nil {
+			a.log().Warn("save config", "err", err)
+		}
+	}
 }
 
 // View returns the current state.
@@ -170,7 +211,8 @@ func (a *App) View() View {
 	defer a.mu.Unlock()
 	v := View{State: a.state, User: a.user, Error: a.lastError, DND: a.cfg.DND, CheckUpdates: a.cfg.CheckUpdates,
 		Version: a.Version, Server: a.Server, DefaultServer: a.DefaultServer, Update: a.update, Updating: a.updating,
-		Position: NormalPosition(a.cfg.Position), Test: a.testing}
+		Position: NormalPosition(a.cfg.Position), Test: a.testing, Managed: a.Managed != nil,
+		FixedServer: a.Managed != nil && a.Managed.Server != ""}
 	if a.Q != nil {
 		v.Queue = a.Q.View()
 	}
@@ -294,7 +336,7 @@ func (a *App) connect(ctx context.Context) {
 		a.stop()
 	}
 	sctx, stop := context.WithCancel(ctx)
-	a.stop = stop
+	a.stop, a.paused = stop, false
 	s := &stream.Stream{URL: stream.WSURL(a.Server), UserAgent: a.userAgent(), Tokens: a.token, H: handler{a}, Log: a.log()}
 	a.stream = s
 	a.state = Connecting
@@ -572,11 +614,15 @@ func (h handler) State(s string) {
 	h.a.setState(s, "")
 }
 
-// DeviceName is the name of the computer for «Мои устройства».
+// DeviceName names the computer and the user for «Мои устройства»: on a terminal server many people share one name of
+// the computer.
 func DeviceName() string {
 	h, err := os.Hostname()
 	if err != nil || h == "" {
-		return "компьютер"
+		h = "компьютер"
+	}
+	if u := os.Getenv("USERNAME"); u != "" {
+		return h + " / " + u
 	}
 	return h
 }

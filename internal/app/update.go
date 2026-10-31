@@ -16,10 +16,11 @@ import (
 	"time"
 
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/managed"
 )
 
 // AssetName is the file of a release (built by .github/workflows/release.yml with its .sha256 next to it).
-const AssetName = "AshCRM-Notify.exe"
+const AssetName = managed.ExeName
 
 // GitHubAPI is replaceable in tests.
 var GitHubAPI = "https://api.github.com"
@@ -141,6 +142,10 @@ func (a *App) latest(ctx context.Context) (*Release, error) {
 
 // CheckUpdate looks for a newer release now (the menu «Проверить обновления») and shows its card.
 func (a *App) CheckUpdate(ctx context.Context) (*Release, error) {
+	if a.Managed != nil { // never past the administrator, a contract mismatch included
+		a.syncFolder(ctx)
+		return nil, nil
+	}
 	if a.Repo == "" {
 		return nil, errors.New("обновления не настроены")
 	}

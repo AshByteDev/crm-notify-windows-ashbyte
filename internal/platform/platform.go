@@ -4,6 +4,7 @@ package platform
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -19,6 +20,31 @@ func Dir() (string, error) {
 	}
 	d := filepath.Join(base, AppName)
 	return d, os.MkdirAll(d, 0o700)
+}
+
+// Home is the folder of the copy of a managed app: %LOCALAPPDATA%\AshCRM Notify on Windows (not %APPDATA%, which may
+// travel with the profile).
+func Home() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, AppName), nil
+}
+
+// Swap puts a new file in place of an old one, which may be running: such a file cannot be overwritten but can be
+// renamed. The old file is removed by the next start (CleanupOld).
+func Swap(path, next string) error {
+	old := path + ".old"
+	_ = os.Remove(old)
+	if err := os.Rename(path, old); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Rename(next, path); err != nil {
+		_ = os.Rename(old, path)
+		return err
+	}
+	return nil
 }
 
 // Config is kept in config.json; the session key is apart, protected (Secrets).

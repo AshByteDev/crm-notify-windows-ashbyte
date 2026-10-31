@@ -33,6 +33,8 @@ const (
 	slotMax  = queue.Max + 1 // three cards and the strip of the unread
 )
 
+const trayClassName = "AshCRMNotifyTray"
+
 // timerHide wakes the UI when the next card must leave the screen.
 const timerHide = 1
 
@@ -106,6 +108,13 @@ func AlreadyRunning() bool {
 	return false
 }
 
+// CloseRunning asks the running copy of this user to close: windows are seen only within their session.
+func CloseRunning() {
+	if h, _, _ := pFindWindowW.Call(uintptr(unsafe.Pointer(utf16(trayClassName))), 0); h != 0 {
+		pPostMessageW.Call(h, wmClose, 0, 0)
+	}
+}
+
 // Quit closes the app (from any goroutine): the tray window goes, the message loop ends.
 func (u *UI) Quit() {
 	if h := u.trayReady.Load(); h != 0 {
@@ -153,7 +162,7 @@ func (u *UI) Run() error {
 	hand, _, _ := pLoadCursorW.Call(0, idcHand)
 	arrow, _, _ := pLoadCursorW.Call(0, idcArrow)
 	trayClass := wndClassEx{Style: 0, WndProc: syscall.NewCallback(u.trayProc), Instance: u.inst, Cursor: arrow,
-		ClassName: utf16("AshCRMNotifyTray")}
+		ClassName: utf16(trayClassName)}
 	trayClass.Size = uint32(unsafe.Sizeof(trayClass))
 	if r, _, err := pRegisterClassExW.Call(ptr(&trayClass)); r == 0 {
 		return fmt.Errorf("register tray class: %w", err)
@@ -184,6 +193,10 @@ func (u *UI) Run() error {
 		u.byHwnd[h] = s
 	}
 	u.addTray()
+	if pWTSRegisterSessionNotification.Find() == nil {
+		pWTSRegisterSessionNotification.Call(u.tray, 0) // NOTIFY_FOR_THIS_SESSION
+		defer pWTSUnRegisterSessionNotification.Call(u.tray)
+	}
 	u.trayReady.Store(u.tray)
 	u.refresh()
 
@@ -339,6 +352,14 @@ func (u *UI) trayProc(hwnd, m, wp, lp uintptr) uintptr {
 			u.A.Reconnect()
 		}
 		return 1
+	case wmSessionChange:
+		switch wp {
+		case wtsConsoleDisconnect, wtsRemoteDisconnect:
+			u.A.Pause()
+		case wtsConsoleConnect, wtsRemoteConnect:
+			u.A.Resume(u.Ctx)
+		}
+		return 0
 	case wmDisplayChange, wmSettingChange, wmDpiChanged:
 		if u.trayReady.Load() != 0 {
 			u.refresh() // the size of the screen, the taskbar or the scale changed
@@ -393,7 +414,9 @@ func (u *UI) menu() {
 	sep()
 	if v.Server != "" {
 		add(0, "Портал: "+strings.TrimPrefix(strings.TrimPrefix(v.Server, "https://"), "http://"), mfGrayed)
-		add(cmdPortal, "Сменить портал…", mfString)
+		if !v.FixedServer {
+			add(cmdPortal, "Сменить портал…", mfString)
+		}
 	}
 	if v.State != app.SignedOut && v.State != app.SigningIn && v.State != app.NeedServer {
 		add(cmdLogout, "Выйти из аккаунта", mfString)
@@ -401,8 +424,11 @@ func (u *UI) menu() {
 	sep()
 	add(cmdSettings, "Настройки…", mfString)
 	add(cmdAutostart, "Запускать вместе с Windows", check(v.Autostart))
-	add(cmdUpdates, "Проверять обновления автоматически", check(v.CheckUpdates))
+	if !v.Managed {
+		add(cmdUpdates, "Проверять обновления автоматически", check(v.CheckUpdates))
+	}
 	switch {
+	case v.Managed: // the administrator decides
 	case v.Updating:
 		add(0, "Обновляю…", mfGrayed)
 	case v.Update != nil:
