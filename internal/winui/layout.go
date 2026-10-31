@@ -1,8 +1,15 @@
 package winui
 
-import "github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
+import (
+	"fmt"
+	"time"
 
-// The geometry of the cards and of the picture in the settings: plain arithmetic, tested on any system.
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/queue"
+)
+
+// The geometry and the texts of the cards and of the picture in the settings: plain logic, tested on any system.
 
 type point struct{ X, Y int32 }
 
@@ -39,6 +46,48 @@ func stack(position string, area rect, width int32, heights []int32, margin, gap
 		}
 	}
 	return out
+}
+
+// clock is the time of a message on this computer: hours and minutes, no date.
+func clock(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Local().Format("15:04")
+}
+
+// cardTitle is who wrote, with the number of unread messages when there are several.
+func cardTitle(c api.Card) string {
+	if c.Count > 1 {
+		return fmt.Sprintf("%s (%d)", c.Title, c.Count)
+	}
+	return c.Title
+}
+
+// stripText is the strip at the edge of the screen ("" — nothing unread, no strip).
+func stripText(q queue.View) string {
+	if q.Unread == 0 {
+		return ""
+	}
+	t := fmt.Sprintf("%d %s", q.Unread, plural(q.Unread, "уведомление", "уведомления", "уведомлений"))
+	if q.DND {
+		t += " · не беспокоить"
+	}
+	return t + " — открыть AshCRM"
+}
+
+func plural(n int, one, few, many string) string {
+	n %= 100
+	if n >= 11 && n <= 14 {
+		return many
+	}
+	switch n % 10 {
+	case 1:
+		return one
+	case 2, 3, 4:
+		return few
+	}
+	return many
 }
 
 // zone is a clickable part of the screen in the picture.

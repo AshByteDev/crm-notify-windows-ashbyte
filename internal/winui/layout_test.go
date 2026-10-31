@@ -2,8 +2,11 @@ package winui
 
 import (
 	"testing"
+	"time"
 
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/queue"
 )
 
 func TestStack(t *testing.T) {
@@ -49,6 +52,41 @@ func TestZones(t *testing.T) {
 	for _, z := range zones(screen) {
 		if zoneName(z.position) == "" {
 			t.Errorf("%s has no name", z.position)
+		}
+	}
+}
+
+func TestClock(t *testing.T) {
+	at := time.Date(2026, 10, 31, 9, 5, 0, 0, time.Local)
+	if got := clock(at.UTC()); got != "09:05" {
+		t.Errorf("local time: %q", got)
+	}
+	if got := clock(time.Time{}); got != "" {
+		t.Errorf("no time: %q", got)
+	}
+}
+
+func TestCardTitle(t *testing.T) {
+	if got := cardTitle(api.Card{Title: "Мария", Count: 1}); got != "Мария" {
+		t.Error(got)
+	}
+	if got := cardTitle(api.Card{Title: "Мария", Count: 4}); got != "Мария (4)" {
+		t.Error(got)
+	}
+}
+
+func TestStripText(t *testing.T) {
+	for _, c := range []struct {
+		q    queue.View
+		want string
+	}{
+		{queue.View{}, ""},
+		{queue.View{Unread: 1}, "1 уведомление — открыть AshCRM"},
+		{queue.View{Unread: 3}, "3 уведомления — открыть AshCRM"},
+		{queue.View{Unread: 11, DND: true}, "11 уведомлений · не беспокоить — открыть AshCRM"},
+	} {
+		if got := stripText(c.q); got != c.want {
+			t.Errorf("%+v: %q", c.q, got)
 		}
 	}
 }

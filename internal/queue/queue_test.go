@@ -148,3 +148,141 @@ func TestMemoryIsBounded(t *testing.T) {
 		t.Fatal("the newest card is kept")
 	}
 }
+
+func later(n int) time.Time { return time.Now().Add(time.Duration(n) * (Show + time.Second)) }
+
+// Cards leave the screen after Show but stay unread; the waiting ones follow in groups of three.
+func TestCardsHideAndNextShow(t *testing.T) {
+	m := New()
+	for i := 1; i <= 5; i++ {
+		m.Card(card(fmt.Sprint("c", i), 1, i))
+	}
+	if v := m.View(); v.Unread != 5 || v.Next.IsZero() {
+		t.Fatalf("%+v", v)
+	}
+	m.Tick(time.Now())
+	if keys(m.View()) != "c3 c2 c1 " {
+		t.Fatal("the time has not ended")
+	}
+	m.Tick(later(1))
+	if v := m.View(); keys(v) != "c5 c4 " || v.Waiting != 0 || v.Unread != 5 {
+		t.Fatalf("%q %+v", keys(v), v)
+	}
+	m.Tick(later(2))
+	if v := m.View(); keys(v) != "" || v.Unread != 5 || !v.Next.IsZero() {
+		t.Fatalf("%q %+v", keys(v), v)
+	}
+	m.Clear("c1")
+	if v := m.View(); v.Unread != 4 {
+		t.Fatalf("read elsewhere: %+v", v)
+	}
+}
+
+// A hidden card returns only with something new: repeated delivery and the state of the server do not show it again.
+func TestHiddenCardReturnsWhenNewer(t *testing.T) {
+	m := New()
+	m.Card(card("a", 1, 1))
+	m.Tick(later(1))
+	m.Card(card("a", 1, 1))
+	m.Sync(api.Snapshot{Cards: []api.Card{card("a", 1, 1)}, Total: 1})
+	if v := m.View(); keys(v) != "" || v.Unread != 1 {
+		t.Fatalf("%q %+v", keys(v), v)
+	}
+	if snd := m.Card(card("a", 2, 2)); snd == "" {
+		t.Error("a new message sounds")
+	}
+	if keys(m.View()) != "a " {
+		t.Fatal(keys(m.View()))
+	}
+}
+
+// A newer message in a visible card gives it the full time again.
+func TestNewerCardExtendsTime(t *testing.T) {
+	m := New()
+	m.Card(card("a", 1, 1))
+	before := m.View().Next
+	time.Sleep(5 * time.Millisecond)
+	m.Card(card("a", 2, 2))
+	if !m.View().Next.After(before) {
+		t.Fatal("the time is not extended")
+	}
+}
+
+func TestHoldKeepsCard(t *testing.T) {
+	m := New()
+	m.Card(card("a", 1, 1))
+	m.Card(card("b", 1, 2))
+	if !m.Hold("a", true) || m.Hold("a", true) {
+		t.Fatal("hold reports a change once")
+	}
+	m.Tick(later(1))
+	if keys(m.View()) != "a " {
+		t.Fatal(keys(m.View()))
+	}
+	if !m.View().Next.IsZero() {
+		t.Fatal("a held card has no end")
+	}
+	if m.Hold("b", false) {
+		t.Fatal("not the held card")
+	}
+	if !m.Hold("a", false) {
+		t.Fatal("release")
+	}
+	m.Tick(time.Now())
+	if keys(m.View()) != "a " {
+		t.Fatal("full time after the mouse leaves")
+	}
+	m.Tick(later(1))
+	if keys(m.View()) != "" {
+		t.Fatal(keys(m.View()))
+	}
+}
+
+func TestLocalCardsStayUntilAction(t *testing.T) {
+	m := New()
+	m.Local(card("update", 0, 1))
+	m.Tick(later(1))
+	if v := m.View(); keys(v) != "update " || v.Unread != 0 || !v.Next.IsZero() {
+		t.Fatalf("%q %+v", keys(v), v)
+	}
+}
+
+// A check is not an unread message: neither the one of the settings nor test-<uuid> of the CRM.
+func TestCheckLeavesForGood(t *testing.T) {
+	m := New()
+	own, crm := card("test", 0, 1), card("test-1", 0, 2)
+	own.Kind, crm.Kind = KindTest, KindTest
+	m.Local(own)
+	m.Card(crm)
+	if v := m.View(); len(v.Visible) != 2 || v.Unread != 0 {
+		t.Fatalf("%+v", v)
+	}
+	m.Tick(later(1))
+	if v := m.View(); len(v.Visible) != 0 || v.Unread != 0 {
+		t.Fatalf("%+v", v)
+	}
+	if _, ok := m.Get("test"); ok {
+		t.Fatal("the check is forgotten")
+	}
+}
+
+func TestUnreadCountsServerRest(t *testing.T) {
+	m := New()
+	m.Sync(api.Snapshot{Cards: []api.Card{card("a", 1, 1)}, Total: 8})
+	if v := m.View(); v.Unread != 8 {
+		t.Fatalf("%+v", v)
+	}
+}
+
+func TestHiddenCardsAreBounded(t *testing.T) {
+	m := New()
+	for i := 0; i < MaxKept+50; i++ {
+		m.Card(card(fmt.Sprint("k", i), 1, i))
+		if i%Max == 0 {
+			m.Tick(later(i + 1))
+		}
+	}
+	if v := m.View(); v.Unread != MaxKept {
+		t.Fatalf("kept %d", v.Unread)
+	}
+}
