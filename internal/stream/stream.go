@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,6 +45,9 @@ const (
 // ErrSignedOut: the session of the app is over — sign in again.
 var ErrSignedOut = errors.New("сессия приложения завершена")
 
+// ErrRefused: the CRM answered and refused the request; sending it again changes nothing.
+var ErrRefused = errors.New("CRM отклонила запрос")
+
 // Handler receives what the server sends.
 type Handler interface {
 	Sync(s api.Snapshot) // the snapshot after connecting and notify.sync
@@ -58,10 +62,11 @@ type Tokens func(ctx context.Context, force bool) (string, error)
 
 // Stream is the connection.
 type Stream struct {
-	URL    string // wss://crm.example.ru/ws?v=1
-	Tokens Tokens
-	H      Handler
-	Log    *slog.Logger
+	URL       string // wss://crm.example.ru/ws?v=1
+	UserAgent string // contract §1
+	Tokens    Tokens
+	H         Handler
+	Log       *slog.Logger
 	// Dial is replaceable in tests.
 	Dial func(ctx context.Context, url string) (*websocket.Conn, error)
 
@@ -109,13 +114,14 @@ func (s *Stream) log() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// Reconnect drops the current socket at once (the computer woke up, the network came back).
+// Reconnect drops the current socket at once (the computer woke up, the network came back). It is called on the UI
+// thread: the socket closes in the background, without the closing handshake a dead connection would stall.
 func (s *Stream) Reconnect() {
 	s.mu.Lock()
 	c, k := s.conn, s.kick
 	s.mu.Unlock()
 	if c != nil {
-		_ = c.Close(websocket.StatusGoingAway, "reconnect")
+		go func() { _ = c.CloseNow() }()
 	}
 	if k != nil {
 		select {
@@ -162,8 +168,23 @@ func (s *Stream) dial(ctx context.Context) (*websocket.Conn, error) {
 	if s.Dial != nil {
 		return s.Dial(ctx, s.URL)
 	}
-	c, _, err := websocket.Dial(ctx, s.URL, nil)
+	var opts *websocket.DialOptions
+	if s.UserAgent != "" {
+		opts = &websocket.DialOptions{HTTPHeader: http.Header{"User-Agent": {s.UserAgent}}}
+	}
+	c, _, err := websocket.Dial(ctx, s.URL, opts)
 	return c, err
+}
+
+// afterClose follows the close codes of contract §4.4: the session may be alive, only a refused refresh ends it.
+func (s *Stream) afterClose(ctx context.Context, err error) error {
+	switch websocket.CloseStatus(err) {
+	case closeSessionRevoked, closeAuthExpired, closeUnauthorized:
+		if _, terr := s.Tokens(ctx, true); terr != nil {
+			return terr
+		}
+	}
+	return err
 }
 
 // session is one connection: auth, snapshot, then frames until it breaks.
@@ -205,11 +226,7 @@ func (s *Stream) session(ctx context.Context) error {
 		// a refused token closes the socket with 4003: refresh it (a revoked session fails there and ends the stream)
 		select {
 		case rerr := <-readErr:
-			if st := websocket.CloseStatus(rerr); st == closeUnauthorized || st == closeSessionRevoked {
-				if _, terr := s.Tokens(ctx, true); terr != nil {
-					return terr
-				}
-			}
+			return s.afterClose(ctx, rerr)
 		case <-time.After(time.Second):
 		}
 		return err
@@ -248,13 +265,7 @@ func (s *Stream) session(ctx context.Context) error {
 			_ = c.Close(websocket.StatusNormalClosure, "bye")
 			return ctx.Err()
 		case err := <-readErr:
-			switch websocket.CloseStatus(err) {
-			case closeSessionRevoked, closeUnauthorized:
-				return ErrSignedOut
-			case closeAuthExpired:
-				_, _ = s.Tokens(ctx, true)
-			}
-			return err
+			return s.afterClose(ctx, err)
 		case <-ping.C:
 			if _, err := s.request(sctx, "ping", nil); err != nil {
 				return err
@@ -387,7 +398,7 @@ func (s *Stream) Read(ctx context.Context, key string) error {
 		return err
 	}
 	if f.Error != nil {
-		return errors.New(f.Error.Message)
+		return fmt.Errorf("%w: %s", ErrRefused, f.Error.Message)
 	}
 	return nil
 }

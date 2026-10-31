@@ -27,6 +27,8 @@ type Config struct {
 	Server       string `json:"server,omitempty"`
 	DND          bool   `json:"dnd"`
 	CheckUpdates bool   `json:"check_updates"`
+	// Position is the place of the cards on the screen (empty — the default corner, app.NormalPosition).
+	Position string `json:"position,omitempty"`
 	// Autostart is asked once (on the first sign-in) and then follows the menu.
 	AutostartSet bool `json:"autostart_set"`
 }

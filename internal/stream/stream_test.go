@@ -40,7 +40,10 @@ type fakeCRM struct {
 	conns     int
 	reads     []string
 	closeWith websocket.StatusCode
+	closeLive websocket.StatusCode // the first socket closes with it after the snapshot
+	refuse    bool                 // notify.read is answered with an error
 	tokens    []string
+	agents    []string
 }
 
 func (f *fakeCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -50,9 +53,13 @@ func (f *fakeCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.conns++
+	f.agents = append(f.agents, r.Header.Get("User-Agent"))
 	n := f.conns
-	closeWith := f.closeWith
+	closeWith, closeLive := f.closeWith, f.closeLive
 	f.mu.Unlock()
+	if closeLive == 0 {
+		closeLive = websocket.StatusGoingAway
+	}
 	ctx := r.Context()
 	send := func(v any) { b, _ := json.Marshal(v); _ = c.Write(ctx, websocket.MessageText, b) }
 	ok := true
@@ -86,14 +93,19 @@ func (f *fakeCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			send(map[string]any{"type": "notify.clear", "data": map[string]any{"keys": []string{"chat-1"}}})
 			send(map[string]any{"type": "notify.sync", "data": api.Snapshot{Cards: []api.Card{{Key: "chat-2"}}, Total: 1}})
 			if n == 1 {
-				go func() { time.Sleep(200 * time.Millisecond); _ = c.Close(websocket.StatusGoingAway, "restart") }()
+				go func() { time.Sleep(200 * time.Millisecond); _ = c.Close(closeLive, "restart") }()
 			}
 		case "notify.read":
 			var d struct{ Key string }
 			_ = json.Unmarshal(in.Data, &d)
 			f.mu.Lock()
 			f.reads = append(f.reads, d.Key)
+			refuse := f.refuse
 			f.mu.Unlock()
+			if refuse {
+				send(map[string]any{"re": in.ID, "ok": false, "error": map[string]any{"code": "validation", "message": "нет такой карточки"}})
+				continue
+			}
 			send(map[string]any{"re": in.ID, "ok": ok, "data": map[string]any{"ok": true}})
 		default:
 			send(map[string]any{"re": in.ID, "ok": ok, "data": map[string]any{}})
@@ -164,6 +176,83 @@ func TestStreamStopsWhenSignedOut(t *testing.T) {
 	}
 	if forced != 1 || h.states[len(h.states)-1] != StateSignedOut {
 		t.Fatalf("forced %d states %v", forced, h.states)
+	}
+}
+
+// A live socket closed with 4001/4003: the session is over only if the refresh says so (contract §4.4).
+func TestLiveCloseAsksRefreshFirst(t *testing.T) {
+	for _, code := range []websocket.StatusCode{closeSessionRevoked, closeUnauthorized} {
+		crm := &fakeCRM{closeLive: code}
+		srv := httptest.NewServer(crm)
+		h := &rec{}
+		s := &Stream{URL: WSURL(srv.URL), H: h, UserAgent: "AshCRM-Notify/1 (Windows)",
+			Tokens: func(context.Context, bool) (string, error) { return "tok", nil }}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- s.Run(ctx) }()
+		for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+			crm.mu.Lock()
+			n := crm.conns
+			crm.mu.Unlock()
+			if n >= 2 {
+				break
+			}
+		}
+		cancel()
+		err := <-done
+		srv.Close()
+		if errors.Is(err, ErrSignedOut) {
+			t.Fatalf("%d with a working refresh signs out", code)
+		}
+		crm.mu.Lock()
+		conns, agent := crm.conns, crm.agents[0]
+		crm.mu.Unlock()
+		if conns < 2 {
+			t.Fatalf("%d: no reconnect", code)
+		}
+		if agent != "AshCRM-Notify/1 (Windows)" {
+			t.Fatalf("User-Agent %q", agent)
+		}
+	}
+}
+
+func TestLiveCloseEndsWhenRefreshRefused(t *testing.T) {
+	crm := &fakeCRM{closeLive: closeSessionRevoked}
+	srv := httptest.NewServer(crm)
+	defer srv.Close()
+	s := &Stream{URL: WSURL(srv.URL), H: &rec{}, Tokens: func(_ context.Context, force bool) (string, error) {
+		if force {
+			return "", &api.Error{Status: 401}
+		}
+		return "tok", nil
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.Run(ctx); !errors.Is(err, ErrSignedOut) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A refused «Прочитано» differs from a lost connection: it is not sent again.
+func TestReadRefused(t *testing.T) {
+	crm := &fakeCRM{refuse: true}
+	srv := httptest.NewServer(crm)
+	defer srv.Close()
+	h := &rec{}
+	s := &Stream{URL: WSURL(srv.URL), H: h, Tokens: func(context.Context, bool) (string, error) { return "tok", nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Read(ctx, "chat-1"); err == nil || errors.Is(err, ErrRefused) {
+		t.Fatalf("no connection yet: %v", err)
+	}
+	go func() { _ = s.Run(ctx) }()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if n, _, _ := h.count(); n > 0 {
+			break
+		}
+	}
+	if err := s.Read(ctx, "chat-1"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("got %v", err)
 	}
 }
 

@@ -41,6 +41,8 @@ const (
 	cmdPortal
 	cmdCheckNow
 	cmdUpdateNow
+	cmdCancelLogin
+	cmdSettings
 )
 
 // what a click hits on a card
@@ -83,6 +85,8 @@ type UI struct {
 	portal       portal
 	portalAsked  bool
 	portalResult atomic.Pointer[error]
+
+	settings settings
 }
 
 // AlreadyRunning holds a named mutex for the session of the user: a second start just exits.
@@ -156,6 +160,9 @@ func (u *UI) Run() error {
 	if err := u.registerPortal(); err != nil {
 		return fmt.Errorf("register portal class: %w", err)
 	}
+	if err := u.registerSettings(); err != nil {
+		return fmt.Errorf("register settings class: %w", err)
+	}
 	u.tray, _, _ = pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(trayClass.ClassName)), 0, 0, 0, 0, 0, 0, 0, 0, u.inst, 0)
 	if u.tray == 0 {
 		return fmt.Errorf("create tray window")
@@ -194,6 +201,20 @@ func (u *UI) Run() error {
 func (u *UI) px(v int) uintptr { return uintptr(float64(v)*u.scale + 0.5) }
 func (u *UI) pi(v int) int32   { return int32(float64(v)*u.scale + 0.5) }
 
+// syncScale follows the DPI of the screen of the cards (GetDpiForSystem stays what it was at the start); it reports a
+// change.
+func (u *UI) syncScale() bool {
+	if pGetDpiForWindow.Find() != nil {
+		return false
+	}
+	dpi, _, _ := pGetDpiForWindow.Call(u.slots[0].hwnd)
+	if dpi == 0 || float64(dpi)/96 == u.scale {
+		return false
+	}
+	u.scale = float64(dpi) / 96
+	return true
+}
+
 // ---- tray ----
 
 func (u *UI) iconFor(v app.View) (string, uintptr) {
@@ -208,7 +229,12 @@ func (u *UI) iconFor(v app.View) (string, uintptr) {
 	if len(v.Queue.Visible)+v.Queue.Waiting > 0 {
 		key += "-dot"
 	}
-	if h, ok := u.icons[key]; ok {
+	size := int(16*u.scale + 0.5)
+	if size < 16 {
+		size = 16
+	}
+	cached := fmt.Sprint(key, size)
+	if h, ok := u.icons[cached]; ok {
 		return key, h
 	}
 	bg := ColorOffline
@@ -217,14 +243,10 @@ func (u *UI) iconFor(v app.View) (string, uintptr) {
 	} else if strings.HasPrefix(key, "dnd") {
 		bg = ColorDND
 	}
-	size := int(16*u.scale + 0.5)
-	if size < 16 {
-		size = 16
-	}
 	png := IconPNG(size*2, bg, strings.HasSuffix(key, "-dot"))
 	h, _, _ := pCreateIconFromResourceEx.Call(uintptr(unsafe.Pointer(&png[0])), uintptr(len(png)), 1, 0x00030000,
 		uintptr(size), uintptr(size), 0)
-	u.icons[key] = h
+	u.icons[cached] = h
 	return key, h
 }
 
@@ -303,6 +325,11 @@ func (u *UI) trayProc(hwnd, m, wp, lp uintptr) uintptr {
 			u.A.Reconnect()
 		}
 		return 1
+	case wmDisplayChange, wmSettingChange, wmDpiChanged:
+		if u.trayReady.Load() != 0 {
+			u.refresh() // the size of the screen, the taskbar or the scale changed
+		}
+		return 0
 	case wmDestroy:
 		pPostQuitMessage.Call(0)
 		return 0
@@ -343,6 +370,8 @@ func (u *UI) menu() {
 		add(cmdPortal, "Указать адрес портала…", mfString)
 	case app.SignedOut:
 		add(cmdLogin, "Войти…", mfString)
+	case app.SigningIn:
+		add(cmdCancelLogin, "Отменить вход", mfString)
 	default:
 		add(cmdOpenCRM, "Открыть AshCRM", mfString)
 	}
@@ -356,6 +385,7 @@ func (u *UI) menu() {
 		add(cmdLogout, "Выйти из аккаунта", mfString)
 	}
 	sep()
+	add(cmdSettings, "Настройки…", mfString)
 	add(cmdAutostart, "Запускать вместе с Windows", check(v.Autostart))
 	add(cmdUpdates, "Проверять обновления автоматически", check(v.CheckUpdates))
 	switch {
@@ -378,6 +408,10 @@ func (u *UI) menu() {
 	switch int(cmd) {
 	case cmdLogin:
 		u.A.Login(u.Ctx)
+	case cmdCancelLogin:
+		u.A.CancelLogin()
+	case cmdSettings:
+		u.showSettings()
 	case cmdLogout:
 		go u.A.Logout(u.Ctx)
 	case cmdOpenCRM:
@@ -413,8 +447,9 @@ func (u *UI) menu() {
 
 // ---- the stack of cards ----
 
-// refresh redraws the tray and puts the cards in their places (the newest at the bottom).
+// refresh redraws the tray and puts the cards in their places (the newest at the edge of the screen).
 func (u *UI) refresh() {
+	rescaled := u.syncScale()
 	v := u.A.View()
 	d := u.trayData(v)
 	pShellNotifyIconW.Call(nimModify, ptr(&d))
@@ -451,8 +486,14 @@ func (u *UI) refresh() {
 
 	var wa rect
 	pSystemParametersInfoW.Call(spiGetWorkArea, 0, ptr(&wa), 0)
-	x := wa.Right - u.pi(margin) - u.pi(cardW)
-	y := wa.Bottom - u.pi(margin)
+	heights := make([]int32, len(list))
+	for i, w := range list {
+		heights[i] = u.pi(cardH)
+		if w.kind == "more" {
+			heights[i] = u.pi(moreH)
+		}
+	}
+	places := stack(v.Position, wa, u.pi(cardW), heights, u.pi(margin), u.pi(gap))
 	for i, s := range u.slots {
 		if i >= len(list) {
 			if s.shown {
@@ -461,15 +502,10 @@ func (u *UI) refresh() {
 			}
 			continue
 		}
-		w := list[i]
-		h := u.pi(cardH)
-		if w.kind == "more" {
-			h = u.pi(moreH)
-		}
-		y -= h
-		changed := s.kind != w.kind || s.text != w.text || s.card != w.card
+		w, h, at := list[i], heights[i], places[i]
+		changed := rescaled || s.kind != w.kind || s.text != w.text || s.card != w.card
 		s.kind, s.text, s.card = w.kind, w.text, w.card
-		pSetWindowPos.Call(s.hwnd, hwndTopmost, uintptr(x), uintptr(y), uintptr(u.pi(cardW)), uintptr(h), swpNoActivate|swpShowWindow)
+		pSetWindowPos.Call(s.hwnd, hwndTopmost, uintptr(at.X), uintptr(at.Y), uintptr(u.pi(cardW)), uintptr(h), swpNoActivate|swpShowWindow)
 		rgn, _, _ := pCreateRoundRectRgn.Call(0, 0, uintptr(u.pi(cardW)+1), uintptr(h+1), uintptr(u.pi(radius)), uintptr(u.pi(radius)))
 		pSetWindowRgn.Call(s.hwnd, rgn, 1)
 		if !s.shown {
@@ -479,7 +515,6 @@ func (u *UI) refresh() {
 		if changed {
 			pInvalidateRect.Call(s.hwnd, 0, 0)
 		}
-		y -= u.pi(gap)
 	}
 }
 
@@ -509,8 +544,6 @@ func (u *UI) buttons(s *slot) (open, read, close rect) {
 	}
 	return
 }
-
-func in(r rect, x, y int32) bool { return x >= r.Left && x < r.Right && y >= r.Top && y < r.Bottom }
 
 func (u *UI) hit(s *slot, x, y int32) int {
 	if s.kind == "more" {
@@ -593,6 +626,9 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 			u.A.Login(u.Ctx)
 		}
 		return 0
+	case wmDpiChanged:
+		u.refresh()
+		return 0
 	case wmClose:
 		return 0 // Alt+F4 on a card does nothing: the card stays until an action
 	}
@@ -619,7 +655,7 @@ var (
 )
 
 func (u *UI) font(size int, bold bool) uintptr {
-	key := fmt.Sprint(size, bold)
+	key := fmt.Sprint(size, bold, u.scale)
 	if f, ok := u.fonts[key]; ok {
 		return f
 	}
@@ -675,19 +711,30 @@ func accent(c api.Card) uintptr {
 	return colBlue
 }
 
-func (u *UI) paint(s *slot) {
+// buffered paints a window through a bitmap, so it never shows half drawn.
+func (u *UI) buffered(hwnd uintptr, draw func(p painter, cr rect)) {
 	var ps paintStruct
-	hdc, _, _ := pBeginPaint.Call(s.hwnd, ptr(&ps))
-	defer pEndPaint.Call(s.hwnd, ptr(&ps))
+	hdc, _, _ := pBeginPaint.Call(hwnd, ptr(&ps))
+	defer pEndPaint.Call(hwnd, ptr(&ps))
 	var cr rect
-	pGetClientRect.Call(s.hwnd, ptr(&cr))
-	w, h := cr.Right, cr.Bottom
+	pGetClientRect.Call(hwnd, ptr(&cr))
 	mem, _, _ := pCreateCompatibleDC.Call(hdc)
-	bmp, _, _ := pCreateCompatibleBitmap.Call(hdc, uintptr(w), uintptr(h))
+	bmp, _, _ := pCreateCompatibleBitmap.Call(hdc, uintptr(cr.Right), uintptr(cr.Bottom))
 	old, _, _ := pSelectObject.Call(mem, bmp)
 	pSetBkMode.Call(mem, transparentMode)
-	p := painter{u: u, dc: mem}
+	draw(painter{u: u, dc: mem}, cr)
+	pBitBlt.Call(hdc, 0, 0, uintptr(cr.Right), uintptr(cr.Bottom), mem, 0, 0, srcCopy)
+	pSelectObject.Call(mem, old)
+	pDeleteObject.Call(bmp)
+	pDeleteDC.Call(mem)
+}
 
+func (u *UI) paint(s *slot) {
+	u.buffered(s.hwnd, func(p painter, cr rect) { u.drawCard(p, s, cr) })
+}
+
+func (u *UI) drawCard(p painter, s *slot, cr rect) {
+	w, h := cr.Right, cr.Bottom
 	if s.kind == "more" {
 		p.fill(cr, colMoreBg)
 		p.text(s.text, rect{u.pi(14), 0, w - u.pi(14), h}, u.font(12, false), colWhite, dtSingleLine|dtVCenter|dtEndEllipsis|dtCenter)
@@ -746,8 +793,4 @@ func (u *UI) paint(s *slot) {
 			p.text(label, read, u.font(13, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
 		}
 	}
-	pBitBlt.Call(hdc, 0, 0, uintptr(w), uintptr(h), mem, 0, 0, srcCopy)
-	pSelectObject.Call(mem, old)
-	pDeleteObject.Call(bmp)
-	pDeleteDC.Call(mem)
 }

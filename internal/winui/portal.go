@@ -41,6 +41,19 @@ func (u *UI) child(class, text string, style uintptr, ex uintptr, x, y, w, h int
 	return hw
 }
 
+// centered creates a hidden window with a caption in the middle of the screen; w and h are the logical client size.
+func (u *UI) centered(class, title string, w, h int) uintptr {
+	style := uintptr(wsOverlapped | wsCaption | wsSysMenu)
+	r := rect{0, 0, u.pi(w), u.pi(h)}
+	pAdjustWindowRectEx.Call(ptr(&r), style, 0, 0)
+	fw, fh := r.Right-r.Left, r.Bottom-r.Top
+	sw, _, _ := pGetSystemMetrics.Call(smCxScreen)
+	sh, _, _ := pGetSystemMetrics.Call(smCyScreen)
+	hwnd, _, _ := pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(utf16(class))), uintptr(unsafe.Pointer(utf16(title))), style,
+		uintptr((int32(sw)-fw)/2), uintptr((int32(sh)-fh)/2), uintptr(fw), uintptr(fh), 0, 0, u.inst, 0)
+	return hwnd
+}
+
 // showPortal opens (or brings back) the window of the address.
 func (u *UI) showPortal(prefill string) {
 	if u.portal.hwnd != 0 {
@@ -48,15 +61,7 @@ func (u *UI) showPortal(prefill string) {
 		pSetForegroundWindow.Call(u.portal.hwnd)
 		return
 	}
-	style := uintptr(wsOverlapped | wsCaption | wsSysMenu)
-	r := rect{0, 0, u.pi(portalW), u.pi(portalH)}
-	pAdjustWindowRectEx.Call(ptr(&r), style, 0, 0)
-	w, h := r.Right-r.Left, r.Bottom-r.Top
-	sw, _, _ := pGetSystemMetrics.Call(smCxScreen)
-	sh, _, _ := pGetSystemMetrics.Call(smCyScreen)
-	u.portal.hwnd, _, _ = pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(utf16("AshCRMNotifyPortal"))),
-		uintptr(unsafe.Pointer(utf16("AshCRM Notify — подключение"))), style,
-		uintptr((int32(sw)-w)/2), uintptr((int32(sh)-h)/2), uintptr(w), uintptr(h), 0, 0, u.inst, 0)
+	u.portal.hwnd = u.centered("AshCRMNotifyPortal", "AshCRM Notify — подключение", portalW, portalH)
 	title := u.child("STATIC", "Адрес портала AshCRM", 0, 0, 20, 16, 400, 22, 0)
 	pSendMessageW.Call(title, wmSetFont, u.font(15, true), 1)
 	u.child("STATIC", "Тот же адрес, по которому вы открываете CRM в браузере, например crm.company.ru", 0, 0, 20, 42, 400, 36, 0)

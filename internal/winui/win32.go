@@ -43,6 +43,8 @@ var (
 	pSetForegroundWindow           = user32.NewProc("SetForegroundWindow")
 	pSystemParametersInfoW         = user32.NewProc("SystemParametersInfoW")
 	pGetDpiForSystem               = user32.NewProc("GetDpiForSystem")
+	pGetDpiForWindow               = user32.NewProc("GetDpiForWindow")
+	pSetCursor                     = user32.NewProc("SetCursor")
 	pSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
 	pSetProcessDPIAware            = user32.NewProc("SetProcessDPIAware")
 	pRegisterWindowMessageW        = user32.NewProc("RegisterWindowMessageW")
@@ -85,6 +87,11 @@ const (
 	wmDestroy        = 0x0002
 	wmPaint          = 0x000F
 	wmClose          = 0x0010
+	wmEraseBkgnd     = 0x0014
+	wmSettingChange  = 0x001A
+	wmSetCursor      = 0x0020
+	wmDisplayChange  = 0x007E
+	wmDpiChanged     = 0x02E0
 	wmMouseMove      = 0x0200
 	wmLButtonUp      = 0x0202
 	wmRButtonUp      = 0x0205
@@ -117,6 +124,7 @@ const (
 	colorWindow      = 5
 	idOK             = 1
 	emSetSel         = 0x00B1
+	htClient         = 1
 
 	wsPopup         = 0x80000000
 	wsExTopmost     = 0x00000008
@@ -163,10 +171,6 @@ const (
 	srcCopy        = 0x00CC0020
 	errAlreadyExis = 183
 )
-
-type point struct{ X, Y int32 }
-
-type rect struct{ Left, Top, Right, Bottom int32 }
 
 type msg struct {
 	Hwnd    uintptr
