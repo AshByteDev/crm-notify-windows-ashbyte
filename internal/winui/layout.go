@@ -69,11 +69,14 @@ func stripText(q queue.View) string {
 	if q.Unread == 0 {
 		return ""
 	}
+	if q.Browsing {
+		return fmt.Sprintf("%d–%d из %d · колесо мыши листает", q.Offset+1, q.Offset+len(q.Visible), q.Listed)
+	}
 	t := fmt.Sprintf("%d %s", q.Unread, plural(q.Unread, "уведомление", "уведомления", "уведомлений"))
 	if q.DND {
 		t += " · не беспокоить"
 	}
-	return t + " — открыть AshCRM"
+	return t
 }
 
 func plural(n int, one, few, many string) string {

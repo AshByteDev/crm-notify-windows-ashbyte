@@ -4,6 +4,8 @@
 package queue
 
 import (
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,9 +15,12 @@ import (
 // Max is the number of cards on the screen at once (decision of the owner).
 const Max = 3
 
-// Show is how long a card stays on the screen (decision of the owner). Cards of the app that need an action have no
-// limit; a card under the mouse waits.
-const Show = 3 * time.Second
+// Show is how long a card stays on the screen by default (config.json changes it). Cards of the app that need an action
+// have no limit; a card under the mouse waits.
+const Show = 5 * time.Second
+
+// StripKey stands for the strip in Hold.
+const StripKey = "strip"
 
 // KindTest is a check of the notifications: of the settings or of the CRM (contract §5.6). It proves the way, it is not
 // an unread message: it is not counted and leaves for good when its time ends.
@@ -36,7 +41,11 @@ type View struct {
 	Unread int
 	// Next: when the next card leaves the screen (zero — none is timed).
 	Next time.Time
-	DND  bool
+	// Browsing: the person opened the list from the strip; Visible is a window of it, Offset cards from the newest.
+	Browsing bool
+	Offset   int
+	Listed   int // cards in the list
+	DND      bool
 }
 
 // Manager is safe for concurrent use: the network feeds it, the screen reads it.
@@ -48,6 +57,10 @@ type Manager struct {
 	seen      []string             // shown and gone from the screen, still unread; the oldest first
 	until     map[string]time.Time // when a visible card leaves the screen
 	held      string               // the card under the mouse
+	show      time.Duration        // how long a card stays on the screen
+	browsing  bool                 // the list opened from the strip
+	offset    int                  // the first card of the list on the screen
+	browseEnd time.Time            // the list closes after the mouse has left it
 	dismissed map[string]time.Time
 	local     map[string]bool // cards of the app itself: the state of the server says nothing about them
 	more      int
@@ -56,7 +69,8 @@ type Manager struct {
 
 // New creates an empty manager.
 func New() *Manager {
-	return &Manager{cards: map[string]api.Card{}, dismissed: map[string]time.Time{}, local: map[string]bool{}, until: map[string]time.Time{}}
+	return &Manager{cards: map[string]api.Card{}, dismissed: map[string]time.Time{}, local: map[string]bool{}, until: map[string]time.Time{},
+		show: Show}
 }
 
 func remove(list []string, key string) ([]string, bool) {
@@ -70,6 +84,15 @@ func remove(list []string, key string) ([]string, bool) {
 
 // fill moves waiting cards to free places (not in DND), the newest first; the newest shown ends at the bottom.
 func (m *Manager) fill() {
+	if m.browsing {
+		list := m.list(time.Time{})
+		if len(list) == 0 {
+			m.endBrowse()
+		} else {
+			m.offset = max(min(m.offset, len(list)-Max), 0)
+			return
+		}
+	}
 	n := min(Max-len(m.visible), len(m.waiting))
 	if m.dnd || n <= 0 {
 		return
@@ -78,7 +101,7 @@ func (m *Manager) fill() {
 	for i := n - 1; i >= 0; i-- {
 		m.visible = append([]string{chosen[i]}, m.visible...)
 		if m.timed(chosen[i]) {
-			m.until[chosen[i]] = time.Now().Add(Show)
+			m.until[chosen[i]] = time.Now().Add(m.show)
 		}
 	}
 	m.waiting = append([]string(nil), m.waiting[n:]...)
@@ -96,7 +119,7 @@ func (m *Manager) put(c api.Card) {
 			return
 		}
 		if _, on := m.until[c.Key]; on {
-			m.until[c.Key] = time.Now().Add(Show)
+			m.until[c.Key] = time.Now().Add(m.show)
 			return
 		}
 		var back bool
@@ -169,6 +192,7 @@ func (m *Manager) drop(k string) {
 	delete(m.until, k)
 	if m.held == k {
 		m.held = ""
+		m.browseEnd = time.Now().Add(m.show) // the next card comes under the mouse
 	}
 	m.visible, _ = remove(m.visible, k)
 	m.waiting, _ = remove(m.waiting, k)
@@ -179,6 +203,13 @@ func (m *Manager) drop(k string) {
 func (m *Manager) Tick(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.browsing {
+		if m.held == "" && !now.Before(m.browseEnd) {
+			m.endBrowse()
+			m.fill()
+		}
+		return
+	}
 	for _, k := range append([]string(nil), m.visible...) {
 		at, timed := m.until[k]
 		if !timed || k == m.held || now.Before(at) {
@@ -200,15 +231,16 @@ func (m *Manager) Hold(key string, on bool) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if on {
-		if _, timed := m.until[key]; !timed || key == m.held {
+		if _, timed := m.until[key]; key == m.held || (!timed && !m.browsing) {
 			return false
 		}
 	} else if key != m.held {
 		return false
 	}
 	if _, timed := m.until[m.held]; timed {
-		m.until[m.held] = time.Now().Add(Show)
+		m.until[m.held] = time.Now().Add(m.show)
 	}
+	m.browseEnd = time.Now().Add(m.show)
 	m.held = ""
 	if on {
 		m.held = key
@@ -270,6 +302,80 @@ func (m *Manager) SetDND(on bool) {
 	m.fill()
 }
 
+// SetShow changes how long a card stays on the screen (nothing or less — the default).
+func (m *Manager) SetShow(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if d <= 0 {
+		d = Show
+	}
+	m.show = d
+}
+
+// list is what the strip counts, the newest first; with a time — only the cards not newer than it.
+func (m *Manager) list(before time.Time) []string {
+	var out []string
+	for k, c := range m.cards {
+		if !m.local[k] && c.Kind != KindTest && (before.IsZero() || !c.At.After(before)) {
+			out = append(out, k)
+		}
+	}
+	slices.SortFunc(out, func(a, b string) int {
+		if c := m.cards[b].At.Compare(m.cards[a].At); c != 0 {
+			return c
+		}
+		return strings.Compare(a, b)
+	})
+	return out
+}
+
+// Unread lists the cards of the strip not newer than a moment.
+func (m *Manager) Unread(before time.Time) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.list(before)
+}
+
+// Browse opens the list from the strip. The person is looking now: nothing waits for its turn, the timers stop.
+func (m *Manager) Browse() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.list(time.Time{})) == 0 {
+		return
+	}
+	for _, k := range append(append([]string(nil), m.visible...), m.waiting...) {
+		if !m.local[k] && m.cards[k].Kind != KindTest {
+			m.visible, _ = remove(m.visible, k)
+			m.waiting, _ = remove(m.waiting, k)
+			delete(m.until, k)
+			m.seen = append(m.seen, k)
+		}
+	}
+	m.browsing, m.offset, m.held = true, 0, ""
+	m.browseEnd = time.Now().Add(m.show)
+}
+
+// EndBrowse closes the list.
+func (m *Manager) EndBrowse() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.endBrowse()
+	m.fill()
+}
+
+func (m *Manager) endBrowse() { m.browsing, m.offset, m.held = false, 0, "" }
+
+// Scroll moves the list by cards: above zero towards the older ones.
+func (m *Manager) Scroll(by int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.browsing {
+		m.offset = max(m.offset+by, 0)
+		m.browseEnd = time.Now().Add(m.show)
+		m.fill()
+	}
+}
+
 // Get returns a card by key.
 func (m *Manager) Get(key string) (api.Card, bool) {
 	m.mu.Lock()
@@ -284,15 +390,24 @@ func (m *Manager) Reset() {
 	defer m.mu.Unlock()
 	m.cards, m.visible, m.waiting, m.seen, m.dismissed, m.local, m.until, m.held, m.more = map[string]api.Card{}, nil, nil, nil,
 		map[string]time.Time{}, map[string]bool{}, map[string]time.Time{}, "", 0
+	m.endBrowse()
 }
 
 // View returns what to show.
 func (m *Manager) View() View {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v := View{Waiting: len(m.waiting), More: m.more, DND: m.dnd}
-	for _, k := range m.visible {
-		v.Visible = append(v.Visible, m.cards[k])
+	v := View{Waiting: len(m.waiting), More: m.more, DND: m.dnd, Browsing: m.browsing, Offset: m.offset}
+	if m.browsing {
+		list := m.list(time.Time{})
+		v.Listed = len(list)
+		for _, k := range list[m.offset:min(m.offset+Max, len(list))] {
+			v.Visible = append(v.Visible, m.cards[k])
+		}
+	} else {
+		for _, k := range m.visible {
+			v.Visible = append(v.Visible, m.cards[k])
+		}
 	}
 	for k, c := range m.cards {
 		if !m.local[k] && c.Kind != KindTest {
@@ -300,9 +415,14 @@ func (m *Manager) View() View {
 		}
 	}
 	v.Unread += m.more
-	for k, at := range m.until {
-		if k != m.held && (v.Next.IsZero() || at.Before(v.Next)) {
-			v.Next = at
+	switch {
+	case m.browsing && m.held == "":
+		v.Next = m.browseEnd
+	case !m.browsing:
+		for k, at := range m.until {
+			if k != m.held && (v.Next.IsZero() || at.Before(v.Next)) {
+				v.Next = at
+			}
 		}
 	}
 	return v

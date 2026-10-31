@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/managed"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/platform"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/queue"
@@ -216,6 +217,18 @@ func TestZeroMinutesChecksOnce(t *testing.T) {
 	}
 	if len(*started) != 1 {
 		t.Fatal(*started)
+	}
+}
+
+func TestNotificationSecondsFromConfig(t *testing.T) {
+	a, dir, _, _ := copyIn(t)
+	if err := managed.Save(dir, managed.Config{NotificationSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	a.tick(context.Background())
+	a.Q.Card(api.Card{Key: "a", Count: 1, At: time.Now()})
+	if d := time.Until(a.Q.View().Next); d < 20*time.Second {
+		t.Fatal(d)
 	}
 }
 

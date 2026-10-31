@@ -52,6 +52,7 @@ const (
 	cmdUpdateNow
 	cmdCancelLogin
 	cmdSettings
+	cmdReadAll
 )
 
 // what a click hits on a card
@@ -621,6 +622,39 @@ func (u *UI) hit(s *slot, x, y int32) int {
 	return hitBody
 }
 
+// holdKey is what keeps its time under the mouse.
+func holdKey(s *slot) string {
+	switch s.kind {
+	case "card":
+		return s.card.Key
+	case "more":
+		return queue.StripKey
+	}
+	return ""
+}
+
+// stripMenu is the right click on the strip.
+func (u *UI) stripMenu() {
+	n := u.A.View().Queue.Unread
+	h, _, _ := pCreatePopupMenu.Call()
+	defer pDestroyMenu.Call(h)
+	pAppendMenuW.Call(h, mfString, cmdOpenCRM, uintptr(unsafe.Pointer(utf16("Открыть AshCRM"))))
+	pAppendMenuW.Call(h, mfString, cmdReadAll, uintptr(unsafe.Pointer(utf16(fmt.Sprintf("Прочитать все (%d)", n)))))
+	var p point
+	pGetCursorPos.Call(ptr(&p))
+	pSetForegroundWindow.Call(u.tray) // else the menu does not close on a click outside
+	cmd, _, _ := pTrackPopupMenu.Call(h, tpmRightButton|tpmReturnCmd, uintptr(p.X), uintptr(p.Y), 0, u.tray, 0)
+	pPostMessageW.Call(u.tray, wmNull, 0, 0)
+	switch int(cmd) {
+	case cmdOpenCRM:
+		u.A.OpenCRM()
+	case cmdReadAll:
+		if confirm(fmt.Sprintf("Отметить прочитанными все уведомления (%d)? Отменить это нельзя.", n)) {
+			u.A.ReadAll(u.Ctx)
+		}
+	}
+}
+
 func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 	s := u.byHwnd[hwnd]
 	switch uint32(m) {
@@ -639,14 +673,16 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 			t := trackMouseEvent{Flags: tmeLeave, Track: hwnd}
 			t.Size = uint32(unsafe.Sizeof(t))
 			pTrackMouseEvent.Call(ptr(&t))
-			if s.kind == "card" && u.A.Q.Hold(s.card.Key, true) {
+			if k := holdKey(s); k != "" && u.A.Q.Hold(k, true) {
 				u.refresh()
 			}
 		}
 		return 0
 	case wmMouseLeave:
-		if s != nil && s.kind == "card" && u.A.Q.Hold(s.card.Key, false) {
-			u.refresh()
+		if s != nil {
+			if k := holdKey(s); k != "" && u.A.Q.Hold(k, false) {
+				u.refresh()
+			}
 		}
 		if s != nil && s.hover != hitNone {
 			s.hover = hitNone
@@ -679,13 +715,31 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 			}
 		case hitBody:
 			if s.kind == "more" {
-				u.A.OpenCRM()
+				if u.A.View().Queue.Browsing {
+					u.A.Q.EndBrowse()
+				} else {
+					u.A.Q.Browse()
+				}
+				u.refresh()
 			} else if s.kind == "card" {
 				u.A.Open(s.card.Key)
 			}
 		case hitLogin:
 			u.A.Login(u.Ctx)
 		}
+		return 0
+	case wmRButtonUp:
+		if s != nil && s.kind == "more" {
+			u.stripMenu()
+		}
+		return 0
+	case wmMouseWheel:
+		if hiword(wp) > 0 {
+			u.A.Q.Scroll(-1)
+		} else {
+			u.A.Q.Scroll(1)
+		}
+		u.refresh()
 		return 0
 	case wmDpiChanged:
 		u.refresh()

@@ -23,6 +23,17 @@ func (a *App) pin() string {
 	return a.Settings.Version
 }
 
+// applyShow gives the time of a notification from config.json to the queue.
+func (a *App) applyShow() {
+	a.mu.Lock()
+	var seconds int
+	if a.Settings != nil {
+		seconds = a.Settings.NotificationSeconds
+	}
+	a.mu.Unlock()
+	a.Q.SetShow(time.Duration(seconds) * time.Second)
+}
+
 // minutes is how often to look for a new version.
 func (a *App) minutes() int {
 	a.mu.Lock()
@@ -100,6 +111,7 @@ func (a *App) readSettings(ctx context.Context) bool {
 	a.Settings = &c
 	old := a.Server
 	a.mu.Unlock()
+	a.applyShow()
 	if c.Server == "" {
 		return false
 	}
@@ -164,7 +176,7 @@ func (a *App) keepBeside() {
 	if skip {
 		return
 	}
-	c := managed.Config{UpdateCheckMinutes: managed.DefaultMinutes}
+	c := managed.Config{UpdateCheckMinutes: managed.DefaultMinutes, NotificationSeconds: managed.DefaultSeconds}
 	if have != nil {
 		c = *have
 	}

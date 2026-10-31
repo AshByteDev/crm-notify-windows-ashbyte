@@ -28,6 +28,8 @@ const (
 	Repo = "AshByteDev/crm-notify-windows-ashbyte"
 	// DefaultMinutes is how often the app looks for a new version.
 	DefaultMinutes = 60
+	// DefaultSeconds is how long a notification stays on the screen.
+	DefaultSeconds = 5
 
 	keepVersions = 2 // the newest and the one before it
 	maxExe       = 100 << 20
@@ -39,6 +41,8 @@ var versioned = regexp.MustCompile(`^AshCRM-Notify-(\d+\.\d+\.\d+)\.exe$`)
 // Config is config.json.
 type Config struct {
 	Server string `json:"server,omitempty"`
+	// NotificationSeconds: how long a notification stays on the screen.
+	NotificationSeconds int `json:"notification_seconds"`
 	// UpdateCheckMinutes: how often to look for a new version; 0 — only when the app starts.
 	UpdateCheckMinutes int `json:"update_check_minutes"`
 	// Version holds every copy on one version, older or newer than the latest.
@@ -56,7 +60,7 @@ func Load(dir string) (c Config, ok bool, err error) {
 	if err != nil {
 		return Config{}, false, err
 	}
-	c.UpdateCheckMinutes = DefaultMinutes
+	c.UpdateCheckMinutes, c.NotificationSeconds = DefaultMinutes, DefaultSeconds
 	if err := json.Unmarshal(stripComments([]byte(strings.TrimPrefix(string(b), bom))), &c); err != nil {
 		return Config{}, false, fmt.Errorf("%s: %w", ConfigName, err)
 	}
@@ -82,6 +86,9 @@ const help = `// Настройки AshCRM Notify. Строки с // — ком
 // server — адрес портала AshCRM:
 //   "server": "https://crm.company.ru"
 //   "server": "http://10.0.0.5:8780"        http только для локальной сети
+//
+// notification_seconds — сколько секунд показывать уведомление:
+//   "notification_seconds": 5
 //
 // update_check_minutes — как часто искать новую версию:
 //   "update_check_minutes": 60              раз в час

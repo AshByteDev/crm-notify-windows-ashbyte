@@ -280,3 +280,86 @@ func TestNotifyCheckSignedOutAndDND(t *testing.T) {
 		t.Fatalf("%+v", v.Queue)
 	}
 }
+
+// allCRM counts notify.read and gives a card that came after the click in every snapshot.
+type allCRM struct {
+	mu    sync.Mutex
+	reads []string
+}
+
+func (f *allCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	c, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return
+	}
+	ctx := r.Context()
+	for {
+		_, raw, err := c.Read(ctx)
+		if err != nil {
+			return
+		}
+		var in struct {
+			ID, Type string
+			Data     struct{ Key string }
+		}
+		_ = json.Unmarshal(raw, &in)
+		answer := map[string]any{"re": in.ID, "ok": true, "data": map[string]any{}}
+		switch in.Type {
+		case "notify.snapshot":
+			answer["data"] = api.Snapshot{Cards: []api.Card{{Key: "chat-1", Count: 1, At: time.Now()}}, Total: 1}
+		case "notify.read":
+			f.mu.Lock()
+			f.reads = append(f.reads, in.Data.Key)
+			f.mu.Unlock()
+		}
+		b, _ := json.Marshal(answer)
+		_ = c.Write(ctx, websocket.MessageText, b)
+	}
+}
+
+func TestReadAll(t *testing.T) {
+	crm := &allCRM{}
+	srv := httptest.NewServer(crm)
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := online(t, ctx, srv.URL)
+	old := time.Now().Add(-time.Hour)
+	a.Q.Card(api.Card{Key: "chat-2", Count: 1, At: old})
+	a.Q.Card(api.Card{Key: "chat-3", Count: 1, At: old})
+	a.Q.Local(api.Card{Key: UpdateKey, At: old})
+	a.ReadAll(ctx)
+	eventually(t, "all read", func() bool {
+		crm.mu.Lock()
+		defer crm.mu.Unlock()
+		return len(crm.reads) == 3
+	})
+	if v := a.View(); v.Queue.Unread != 0 {
+		t.Fatalf("%+v", v.Queue)
+	}
+	if _, ok := a.Q.Get(UpdateKey); !ok {
+		t.Fatal("the card of the app stays")
+	}
+}
+
+// The rest of the server arrives with notify.sync; a message after the click stays unread.
+func TestReadAllContinuesAfterSync(t *testing.T) {
+	crm := &allCRM{}
+	srv := httptest.NewServer(crm)
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := online(t, ctx, srv.URL)
+	old := time.Now().Add(-time.Hour)
+	a.handlerSync(api.Snapshot{Cards: []api.Card{{Key: "chat-1", Count: 1, At: old}}, Total: 2})
+	a.ReadAll(ctx)
+	a.handlerSync(api.Snapshot{Cards: []api.Card{{Key: "chat-2", Count: 1, At: old}, {Key: "chat-9", Count: 1, At: time.Now().Add(time.Hour)}}, Total: 2})
+	eventually(t, "both read", func() bool {
+		crm.mu.Lock()
+		defer crm.mu.Unlock()
+		return len(crm.reads) == 2
+	})
+	if _, ok := a.Q.Get("chat-9"); !ok {
+		t.Fatal("a newer message is read blindly")
+	}
+}
