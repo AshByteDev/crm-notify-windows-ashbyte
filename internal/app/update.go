@@ -2,16 +2,12 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +15,8 @@ import (
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/managed"
 )
 
-// AssetName is the file of a release (built by .github/workflows/release.yml with its .sha256 next to it).
+// AssetName is the file of a release (built by .github/workflows/release.yml with its .sha256 next to it). It is saved
+// under the name of its version.
 const AssetName = managed.ExeName
 
 // GitHubAPI is replaceable in tests.
@@ -37,23 +34,7 @@ type Release struct {
 	Page    string // the release page
 }
 
-// newer compares versions "X.Y.Z" (a leading «v» is ignored).
-func newer(v, than string) bool {
-	parse := func(s string) [3]int {
-		var out [3]int
-		for i, p := range strings.SplitN(strings.TrimPrefix(s, "v"), ".", 3) {
-			out[i], _ = strconv.Atoi(p)
-		}
-		return out
-	}
-	a, b := parse(v), parse(than)
-	for i := range a {
-		if a[i] != b[i] {
-			return a[i] > b[i]
-		}
-	}
-	return false
-}
+func newer(v, than string) bool { return managed.Newer(v, than) }
 
 func (a *App) get(ctx context.Context, url string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -80,11 +61,15 @@ func (a *App) get(ctx context.Context, url string, limit int64) ([]byte, error) 
 	return b, nil
 }
 
-// latest reads the latest release of the repository; nil — nothing newer.
-func (a *App) latest(ctx context.Context) (*Release, error) {
+// latest reads the release to have: the pinned one or the latest; nil — nothing newer than the app.
+func (a *App) latest(ctx context.Context, pin string) (*Release, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	raw, err := a.get(ctx, GitHubAPI+"/repos/"+a.Repo+"/releases/latest", 1<<20)
+	page := "/releases/latest"
+	if pin != "" {
+		page = "/releases/tags/v" + pin
+	}
+	raw, err := a.get(ctx, GitHubAPI+"/repos/"+a.Repo+page, 1<<20)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +86,7 @@ func (a *App) latest(ctx context.Context) (*Release, error) {
 	if err := json.Unmarshal(raw, &gh); err != nil {
 		return nil, err
 	}
-	if !newer(gh.Tag, a.Version) {
+	if pin == "" && !newer(gh.Tag, a.Version) {
 		return nil, nil
 	}
 	r := &Release{Version: strings.TrimPrefix(gh.Tag, "v"), Notes: strings.TrimSpace(gh.Body), Page: gh.Page}
@@ -140,19 +125,16 @@ func (a *App) latest(ctx context.Context) (*Release, error) {
 	return r, nil
 }
 
-// CheckUpdate looks for a newer release now (the menu «Проверить обновления») and shows its card.
+// CheckUpdate looks for a newer release now (the menu «Проверить обновления») and shows its card. Without the right to
+// write the card would promise what the app cannot do: the scheduled task gets the versions there.
 func (a *App) CheckUpdate(ctx context.Context) (*Release, error) {
-	a.mu.Lock()
-	managedCopy := a.folder()
-	a.mu.Unlock()
-	if managedCopy { // never past the administrator, a contract mismatch included
-		a.syncFolder(ctx)
+	if a.Shared {
 		return nil, nil
 	}
 	if a.Repo == "" {
 		return nil, errors.New("обновления не настроены")
 	}
-	r, err := a.latest(ctx)
+	r, err := a.latest(ctx, "")
 	if err != nil {
 		return nil, err
 	}
@@ -171,29 +153,7 @@ func (a *App) CheckUpdate(ctx context.Context) (*Release, error) {
 	return r, nil
 }
 
-// updates checks once a day while «Проверять обновления» is on.
-func (a *App) updates(ctx context.Context) {
-	if a.Repo == "" {
-		return
-	}
-	for {
-		a.mu.Lock()
-		on := a.cfg.CheckUpdates
-		a.mu.Unlock()
-		if on {
-			if _, err := a.CheckUpdate(ctx); err != nil {
-				a.log().Info("update check", "err", err)
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(24 * time.Hour):
-		}
-	}
-}
-
-// Update downloads the new version, checks its SHA-256, puts it in place of the running file and restarts.
+// Update downloads the new version next to the app and restarts from it.
 func (a *App) Update(ctx context.Context) error {
 	a.mu.Lock()
 	r := a.update
@@ -204,7 +164,7 @@ func (a *App) Update(ctx context.Context) error {
 	a.updating = true
 	a.mu.Unlock()
 	a.changed()
-	err := a.install(ctx, r)
+	path, err := a.store(ctx, r)
 	a.mu.Lock()
 	a.updating = false
 	a.mu.Unlock()
@@ -212,59 +172,47 @@ func (a *App) Update(ctx context.Context) error {
 		a.setState(a.View().State, "обновление не удалось: "+err.Error())
 		return err
 	}
-	if a.Quit != nil {
-		a.Quit()
-	}
+	a.restart(path)
 	return nil
 }
 
-func (a *App) install(ctx context.Context, r *Release) error {
-	if a.P.Replace == nil {
-		return errors.New("обновление из приложения есть только в Windows")
-	}
-	exe, err := os.Executable()
+// Fetch brings the pinned or the latest version next to the app and removes the old ones: the work of the scheduled task
+// on a terminal server, of the app itself on an ordinary computer with a pinned version.
+func (a *App) Fetch(ctx context.Context) error {
+	pin := a.pin()
+	r, err := a.latest(ctx, pin)
 	if err != nil {
 		return err
+	}
+	if r != nil {
+		if _, err := a.store(ctx, r); err != nil {
+			return err
+		}
+	}
+	managed.Cleanup(a.here(), pin, a.Version)
+	return nil
+}
+
+// store saves a release under the name of its version; a correct file already there is not fetched again.
+func (a *App) store(ctx context.Context, r *Release) (string, error) {
+	path := filepath.Join(a.here(), managed.FileName(r.Version))
+	if managed.Verify(path) == nil {
+		return path, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", r.URL, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("User-Agent", a.userAgent())
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
-		return fmt.Errorf("скачивание: HTTP %d", res.StatusCode)
+		return "", fmt.Errorf("скачивание: HTTP %d", res.StatusCode)
 	}
-	// next to the running file: a rename within one folder always works (another disk would not)
-	next := filepath.Join(filepath.Dir(exe), "AshCRM-Notify.new.exe")
-	f, err := os.OpenFile(next, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
-	if err != nil {
-		return fmt.Errorf("нет прав на папку приложения: %w", err)
-	}
-	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(f, h), io.LimitReader(res.Body, 100<<20))
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		_ = os.Remove(next)
-		return err
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, r.SHA256) {
-		_ = os.Remove(next)
-		return errors.New("контрольная сумма не совпала — файл не установлен")
-	}
-	if err := a.P.Replace(exe, next); err != nil {
-		return err
-	}
-	if err := managed.SaveSum(filepath.Dir(exe), r.SHA256); err != nil {
-		a.log().Info("save sha256", "err", err)
-	}
-	return nil
+	return managed.Store(a.here(), r.Version, r.SHA256, res.Body)
 }

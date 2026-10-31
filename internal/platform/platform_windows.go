@@ -60,15 +60,6 @@ func OpenURL(u string) error {
 	return nil
 }
 
-// Replace puts the downloaded version in place of the running file (a running .exe cannot be overwritten but can
-// be renamed) and starts it; the caller quits. The old file is removed by the next start (CleanupOld).
-func Replace(running, downloaded string) error {
-	if err := Swap(running, downloaded); err != nil {
-		return err
-	}
-	return exec.Command(running, "--updated").Start()
-}
-
 // CleanupOld removes the file left by the previous update.
 func CleanupOld() {
 	if exe, err := os.Executable(); err == nil {
@@ -76,18 +67,14 @@ func CleanupOld() {
 	}
 }
 
-// Uninstall removes the app from the profile of the user: autostart, the shortcut, the settings and, after the app has
-// closed, the folder of the copy (a running file cannot be removed by itself).
+// Uninstall removes the app from the profile of the user: autostart, the shortcut and, after the app has closed, its
+// settings with the session (their log file is still open). The files of the app stay: they may serve other users.
 func Uninstall() error {
-	if err := SetAutostart(false); err != nil {
+	if err := SetAutostart("", false); err != nil {
 		return err
 	}
 	if p, err := shortcutPath(); err == nil {
 		_ = os.Remove(p)
-	}
-	home, err := Home()
-	if err != nil {
-		return err
 	}
 	dir, err := Dir()
 	if err != nil {
@@ -95,7 +82,7 @@ func Uninstall() error {
 	}
 	cmd := exec.Command("cmd.exe")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true,
-		CmdLine: `cmd.exe /c ping -n 4 127.0.0.1 >nul & rmdir /s /q "` + home + `" & rmdir /s /q "` + dir + `"`}
+		CmdLine: `cmd.exe /c ping -n 4 127.0.0.1 >nul & rmdir /s /q "` + dir + `"`}
 	return cmd.Start()
 }
 
@@ -112,8 +99,8 @@ func Autostart() bool {
 	return err == nil
 }
 
-// SetAutostart switches starting with Windows for the current user.
-func SetAutostart(on bool) error {
+// SetAutostart switches starting with Windows for the current user; path is the file with the constant name.
+func SetAutostart(path string, on bool) error {
 	k, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.SET_VALUE)
 	if err != nil {
 		return err
@@ -125,11 +112,7 @@ func SetAutostart(on bool) error {
 		}
 		return nil
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	return k.SetStringValue(AppName, `"`+exe+`" --autostart`)
+	return k.SetStringValue(AppName, `"`+path+`" --autostart`)
 }
 
 const (

@@ -3,9 +3,7 @@ package app
 import (
 	"context"
 	"math/rand/v2"
-	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
@@ -13,140 +11,111 @@ import (
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/platform"
 )
 
-// The folder of the administrator is checked about once an hour; the spread keeps the copies of one server from reading
-// it at the same moment.
-func folderPause() time.Duration { return 50*time.Minute + rand.N(20*time.Minute) }
-func firstPause() time.Duration  { return rand.N(10 * time.Minute) }
+func (a *App) here() string { return filepath.Dir(a.Exe) }
 
-// followFolder keeps a managed copy in step with the folder of the administrator.
-func (a *App) followFolder(ctx context.Context) {
-	wait := firstPause()
+// pin is the version held by config.json ("" — the latest).
+func (a *App) pin() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.Settings == nil {
+		return ""
+	}
+	return a.Settings.Version
+}
+
+// minutes is how often to look for a new version.
+func (a *App) minutes() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.Settings == nil {
+		return managed.DefaultMinutes
+	}
+	return a.Settings.UpdateCheckMinutes
+}
+
+// follow looks at what lies next to the app: at the start and, unless config.json says 0, again and again. The spread
+// keeps the copies of one server from restarting at the same moment.
+func (a *App) follow(ctx context.Context) {
 	for {
+		a.tick(ctx)
+		m := a.minutes()
+		if m <= 0 {
+			return
+		}
+		period := time.Duration(m) * time.Minute
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(wait):
+		case <-time.After(period - period/8 + rand.N(period/4)):
 		}
-		a.syncFolder(ctx)
-		a.mu.Lock()
-		on := a.folder()
-		a.mu.Unlock()
-		if !on { // the administrator has sent the copy back to GitHub
-			a.updates(ctx)
-			return
-		}
-		wait = folderPause()
 	}
 }
 
-// syncFolder applies what the administrator has put in the folder: the removal, the settings, another version. An
-// unreachable folder or a half-copied file is not an error of the person: it waits for the next check.
-func (a *App) syncFolder(ctx context.Context) {
-	if !a.syncing.TryLock() {
+// tick applies config.json, moves to a new version next to the app and, where the app may write, gets one and removes
+// the old files. An unreachable GitHub is not an error of the person: it waits for the next look.
+func (a *App) tick(ctx context.Context) {
+	if a.Exe == "" || !a.syncing.TryLock() {
 		return
 	}
 	defer a.syncing.Unlock()
-	a.mu.Lock()
-	cur := *a.Managed
-	a.mu.Unlock()
-	folder := cur.UpdateSource
-	c, ok, err := managed.Load(folder)
-	if err != nil {
-		a.log().Info("managed settings", "err", err)
+	if a.readSettings(ctx) || a.moveToTarget() || a.Shared {
 		return
 	}
-	if ok {
-		if c.Disabled {
-			a.Uninstall(ctx)
+	if a.pin() != "" {
+		if err := a.Fetch(ctx); err != nil {
+			a.log().Info("update", "err", err)
+		}
+		if a.moveToTarget() {
 			return
 		}
-		if c.UpdateSource == "" {
-			c.UpdateSource = folder // a copy stays managed until it is removed
-		}
-		if c != cur {
-			a.applyManaged(ctx, c)
-		}
-		if !c.Managed() {
-			return
+	} else if a.Repo != "" && a.checkUpdates() {
+		if _, err := a.CheckUpdate(ctx); err != nil {
+			a.log().Info("update check", "err", err)
 		}
 	}
-	want, err := managed.ReadSum(folder)
-	if err != nil {
-		a.log().Info("managed update", "err", err)
-		return
-	}
-	have, err := managed.Sum(a.Exe)
-	if err != nil {
-		a.log().Warn("managed update", "err", err)
-		return
-	}
-	if strings.EqualFold(have, want) {
-		return
-	}
-	if a.P.Replace == nil {
-		return
-	}
-	next := filepath.Join(filepath.Dir(a.Exe), managed.NextName)
-	if err := managed.Fetch(filepath.Join(folder, managed.ExeName), next, want); err != nil {
-		a.log().Info("managed update", "err", err)
-		return
-	}
-	if err := a.P.Replace(a.Exe, next); err != nil {
-		_ = os.Remove(next)
-		a.log().Warn("managed update", "err", err)
-		return
-	}
-	if err := managed.SaveSum(filepath.Dir(a.Exe), want); err != nil {
-		a.log().Info("save sha256", "err", err)
-	}
-	if a.Quit != nil {
-		a.Quit()
-	}
+	managed.Cleanup(a.here(), a.pin(), a.Version)
 }
 
-// keepBeside writes the portal into config.json next to the app. The folder may be closed for writing (the app then
-// works without the file): that is not an error.
-func (a *App) keepBeside() {
+func (a *App) checkUpdates() bool {
 	a.mu.Lock()
-	server, have := a.Server, a.Managed
-	skip := a.folder() || a.Exe == "" || server == "" || (have != nil && have.Server == server)
-	a.mu.Unlock()
-	if skip {
-		return
-	}
-	c := managed.Config{Server: server, UpdateSource: managed.GitHubSource}
-	if have != nil && have.UpdateSource != "" {
-		c.UpdateSource = have.UpdateSource
-	}
-	if err := managed.Save(filepath.Dir(a.Exe), c); err != nil {
+	defer a.mu.Unlock()
+	return a.cfg.CheckUpdates
+}
+
+// readSettings applies config.json; true — the app is being removed.
+func (a *App) readSettings(ctx context.Context) bool {
+	c, ok, err := managed.Load(a.here())
+	if err != nil {
 		a.log().Info("config.json", "err", err)
+		return false
+	}
+	if !ok {
+		return false
+	}
+	if c.Disabled {
+		a.Uninstall(ctx)
+		return true
 	}
 	a.mu.Lock()
-	a.Managed = &c
-	a.mu.Unlock()
-}
-
-// applyManaged keeps the new settings of the administrator; another portal means another account.
-func (a *App) applyManaged(ctx context.Context, c managed.Config) {
-	if err := managed.Save(filepath.Dir(a.Exe), c); err != nil {
-		a.log().Warn("managed settings", "err", err)
-		return
-	}
-	a.mu.Lock()
-	*a.Managed = c
+	a.Settings = &c
 	old := a.Server
 	a.mu.Unlock()
 	if c.Server == "" {
-		return
+		return false
 	}
 	server, err := NormalizeServer(c.Server)
 	if err != nil {
-		a.log().Warn("managed portal", "err", err)
-		return
+		a.log().Warn("portal in config.json", "err", err)
+		return false
 	}
-	if server == old {
-		return
+	if server != old {
+		a.changePortal(ctx, server)
 	}
+	return false
+}
+
+// changePortal: another portal means another account.
+func (a *App) changePortal(ctx context.Context, server string) {
 	a.CancelLogin()
 	a.Logout(ctx)
 	a.mu.Lock()
@@ -159,6 +128,53 @@ func (a *App) applyManaged(ctx context.Context, c managed.Config) {
 		a.log().Warn("save config", "err", err)
 	}
 	a.changed()
+}
+
+// moveToTarget restarts from the version the app should run; true — this copy is closing.
+func (a *App) moveToTarget() bool {
+	t, ok := managed.Target(a.here(), a.pin(), a.Version)
+	if !ok || t.Version == a.Version {
+		return false
+	}
+	return a.restart(t.Path)
+}
+
+// restart starts another file of the app and closes this copy.
+func (a *App) restart(path string) bool {
+	if a.P.Start == nil {
+		return false
+	}
+	if err := a.P.Start(path, "--updated", "--from", a.Launcher); err != nil {
+		a.log().Warn("restart", "err", err)
+		return false
+	}
+	if a.Quit != nil {
+		a.Quit()
+	}
+	return true
+}
+
+// keepBeside writes the portal into config.json next to the app. The folder may be closed for writing (the app then
+// works without the file): that is not an error.
+func (a *App) keepBeside() {
+	a.mu.Lock()
+	server, have := a.Server, a.Settings
+	skip := a.Shared || a.Exe == "" || server == "" || (have != nil && have.Server == server)
+	a.mu.Unlock()
+	if skip {
+		return
+	}
+	c := managed.Config{UpdateCheckMinutes: managed.DefaultMinutes}
+	if have != nil {
+		c = *have
+	}
+	c.Server = server
+	if err := managed.Save(a.here(), c); err != nil {
+		a.log().Info("config.json", "err", err)
+	}
+	a.mu.Lock()
+	a.Settings = &c
+	a.mu.Unlock()
 }
 
 // Uninstall ends the session in the CRM and removes the app from this profile.

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/managed"
 )
 
 func TestNewer(t *testing.T) {
@@ -93,17 +95,11 @@ func TestUpdateFromRelease(t *testing.T) {
 	defer srv.Close()
 	GitHubAPI = srv.URL
 	downloadPrefix = srv.URL + "/"
-	var replaced string
+	dir := t.TempDir()
+	var started string
 	quit := false
-	a := &App{Version: "0.0.3", Repo: "o/r", Dir: t.TempDir(), Quit: func() { quit = true },
-		P: Platform{Replace: func(running, downloaded string) error {
-			replaced = downloaded
-			b, _ := os.ReadFile(downloaded)
-			if string(b) != string(exe) {
-				t.Errorf("downloaded %q", b)
-			}
-			return os.Remove(downloaded)
-		}}}
+	a := &App{Version: "0.0.3", Repo: "o/r", Dir: t.TempDir(), Exe: filepath.Join(dir, managed.ExeName), Quit: func() { quit = true },
+		P: Platform{Start: func(path string, args ...string) error { started = path; return nil }}}
 	a.Start(context.Background())
 	r, err := a.CheckUpdate(context.Background())
 	if err != nil || r == nil || r.Version != "9.9.9" {
@@ -112,20 +108,34 @@ func TestUpdateFromRelease(t *testing.T) {
 	if c, ok := a.Q.Get(UpdateKey); !ok || c.Title != "Доступна версия 9.9.9" || c.Body != "Что нового" {
 		t.Fatalf("card %+v", c)
 	}
-	if err := a.Update(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if filepath.Base(replaced) != "AshCRM-Notify.new.exe" || !quit {
-		t.Fatalf("replaced %q quit %v", replaced, quit)
-	}
 
-	// a file that does not match its checksum is not installed
+	// a file that does not match its checksum is not kept
+	good := a.update.SHA256
 	a.mu.Lock()
 	a.update.SHA256 = strings.Repeat("0", 64)
 	a.mu.Unlock()
-	replaced, quit = "", false
-	if err := a.Update(context.Background()); err == nil || replaced != "" || quit {
-		t.Fatalf("bad checksum: %v %q %v", err, replaced, quit)
+	if err := a.Update(context.Background()); err == nil || started != "" || quit {
+		t.Fatalf("bad checksum: %v %q %v", err, started, quit)
+	}
+	if len(managed.List(dir)) != 0 {
+		t.Fatal("a wrong file stays")
+	}
+
+	a.mu.Lock()
+	a.update.SHA256 = good
+	a.mu.Unlock()
+	if err := a.Update(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, managed.FileName("9.9.9"))
+	if started != want || !quit {
+		t.Fatalf("started %q quit %v", started, quit)
+	}
+	if b, _ := os.ReadFile(want); string(b) != string(exe) {
+		t.Fatalf("%q", b)
+	}
+	if managed.Verify(want) != nil {
+		t.Fatal("no .sha256 next to the version")
 	}
 }
 

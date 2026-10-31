@@ -68,8 +68,8 @@ type Platform struct {
 	PlaySound    func(class string)
 	Autostart    func() bool
 	SetAutostart func(bool) error
-	// Replace puts the downloaded file in place of the running one and starts it (nil — not supported here).
-	Replace func(running, downloaded string) error
+	// Start starts another file of the app (nil — not supported here).
+	Start func(path string, args ...string) error
 	// Uninstall removes the app from the profile of the user (nil — not supported here).
 	Uninstall func() error
 }
@@ -86,10 +86,14 @@ type App struct {
 	Device string // the computer name shown in «Мои устройства»
 	P      Platform
 	Exe    string // the running file
-	// Managed: config.json next to the running file (nil — none yet); with UpdateSource the administrator decides on
-	// the updates, without it they come from GitHub.
-	Managed *managed.Config
-	Log     *slog.Logger
+	// Launcher is the file with the constant name: autostart and the shortcut point at it.
+	Launcher string
+	// Shared: the app may not write next to itself (a terminal server): the administrator keeps config.json, new
+	// versions come from the scheduled task.
+	Shared bool
+	// Settings is config.json next to the running file (nil — none yet).
+	Settings *managed.Config
+	Log      *slog.Logger
 	// Changed asks the UI to redraw (called from any goroutine).
 	Changed func()
 	// Quit closes the app (after an update the new copy starts).
@@ -126,7 +130,7 @@ type View struct {
 	State         string
 	DefaultServer string
 	Update        *Release // a newer version on GitHub
-	Managed       bool     // the administrator decides on the updates
+	Shared        bool     // the administrator decides on the updates
 	FixedServer   bool     // the administrator has set the portal
 	Updating      bool
 	User          string
@@ -163,11 +167,7 @@ func (a *App) Start(ctx context.Context) {
 	if a.secret.RefreshToken != "" {
 		a.connect(ctx)
 	}
-	if a.folder() {
-		go a.followFolder(ctx)
-	} else {
-		go a.updates(ctx)
-	}
+	go a.follow(ctx)
 	a.changed()
 }
 
@@ -188,15 +188,12 @@ func (a *App) Load() {
 	}
 }
 
-// folder: the copy follows the folder of the administrator (call under a.mu once goroutines are running).
-func (a *App) folder() bool { return a.Managed != nil && a.Managed.Managed() }
-
 // adoptManagedServer: the portal of config.json wins; the session of another portal is of no use.
 func (a *App) adoptManagedServer() {
-	if a.Managed == nil || a.Managed.Server == "" {
+	if a.Settings == nil || a.Settings.Server == "" {
 		return
 	}
-	s, err := NormalizeServer(a.Managed.Server)
+	s, err := NormalizeServer(a.Settings.Server)
 	if err != nil {
 		a.log().Warn("managed portal", "err", err)
 		return
@@ -216,8 +213,8 @@ func (a *App) View() View {
 	defer a.mu.Unlock()
 	v := View{State: a.state, User: a.user, Error: a.lastError, DND: a.cfg.DND, CheckUpdates: a.cfg.CheckUpdates,
 		Version: a.Version, Server: a.Server, DefaultServer: a.DefaultServer, Update: a.update, Updating: a.updating,
-		Position: NormalPosition(a.cfg.Position), Test: a.testing, Managed: a.folder(),
-		FixedServer: a.folder() && a.Managed.Server != ""}
+		Position: NormalPosition(a.cfg.Position), Test: a.testing, Shared: a.Shared,
+		FixedServer: a.Shared && a.Settings != nil && a.Settings.Server != ""}
 	if a.Q != nil {
 		v.Queue = a.Q.View()
 	}
@@ -556,7 +553,7 @@ func (a *App) SetPosition(p string) {
 	a.changed()
 }
 
-// SetCheckUpdates switches the daily update check.
+// SetCheckUpdates switches the regular update check.
 func (a *App) SetCheckUpdates(on bool) {
 	a.mu.Lock()
 	a.cfg.CheckUpdates = on
