@@ -83,6 +83,7 @@ type UI struct {
 	tray      uintptr
 	trayReady atomic.Uintptr // the tray window for Notify (set once it exists)
 	trayMsg   uint32         // TaskbarCreated: Explorer restarted, the icon must be added again
+	quitAsked atomic.Bool
 	scale     float64
 	icons     map[string]uintptr
 	iconKey   string
@@ -117,6 +118,7 @@ func CloseRunning() {
 
 // Quit closes the app (from any goroutine): the tray window goes, the message loop ends.
 func (u *UI) Quit() {
+	u.quitAsked.Store(true) // the tray window may not exist yet: Run looks at this
 	if h := u.trayReady.Load(); h != 0 {
 		pPostMessageW.Call(h, wmClose, 0, 0)
 	}
@@ -198,6 +200,9 @@ func (u *UI) Run() error {
 		defer pWTSUnRegisterSessionNotification.Call(u.tray)
 	}
 	u.trayReady.Store(u.tray)
+	if u.quitAsked.Load() {
+		pPostMessageW.Call(u.tray, wmClose, 0, 0)
+	}
 	u.refresh()
 
 	var m msg
@@ -424,11 +429,11 @@ func (u *UI) menu() {
 	sep()
 	add(cmdSettings, "Настройки…", mfString)
 	add(cmdAutostart, "Запускать вместе с Windows", check(v.Autostart))
-	if !v.Managed {
+	if !v.Shared {
 		add(cmdUpdates, "Проверять обновления автоматически", check(v.CheckUpdates))
 	}
 	switch {
-	case v.Managed: // the administrator decides
+	case v.Shared: // the administrator decides
 	case v.Updating:
 		add(0, "Обновляю…", mfGrayed)
 	case v.Update != nil:

@@ -17,7 +17,7 @@ import (
 var (
 	version = "dev"
 	server  = ""
-	repo    = "AshByteDev/crm-notify-windows-ashbyte" // releases with updates
+	repo    = managed.Repo // releases with updates
 )
 
 // newApp builds the client from the flags and the build settings.
@@ -25,7 +25,8 @@ func newApp() (*app.App, error) {
 	srv := flag.String("server", "", "адрес портала AshCRM (вместо сохранённого)")
 	_ = flag.Bool("autostart", false, "запущено вместе с Windows")
 	_ = flag.Bool("updated", false, "запущено после обновления")
-	_ = flag.Bool("installed", false, "запущено после установки из папки администратора")
+	from := flag.String("from", "", "файл с постоянным именем, из которого запущена версия")
+	_ = flag.Bool("fetch-update", false, "скачать новую версию и выйти (задача планировщика)")
 	_ = flag.Bool("uninstall", false, "удалить приложение из профиля пользователя")
 	flag.Parse()
 	platform.CleanupOld()
@@ -45,17 +46,22 @@ func newApp() (*app.App, error) {
 	if err != nil {
 		return nil, err
 	}
+	launcher := *from
+	if launcher == "" {
+		launcher = exe
+	}
 	log := logger(dir)
-	var settings *managed.Config // the file of the administrator next to the running copy
+	var settings *managed.Config // config.json next to the running copy
 	if c, ok, err := managed.Load(filepath.Dir(exe)); err != nil {
-		log.Warn("managed settings", "err", err)
-	} else if ok {
+		log.Warn("config.json", "err", err)
+	} else if ok && *srv == "" { // an explicit portal outranks the file
 		settings = &c
 	}
 	return &app.App{DefaultServer: server, Version: version, Repo: repo, Dir: dir, Device: app.DeviceName(), Exe: exe,
-		Managed: settings, Log: log,
+		Launcher: launcher, Shared: !managed.Writable(filepath.Dir(exe)), Settings: settings, Log: log,
 		P: app.Platform{OpenURL: platform.OpenURL, PlaySound: platform.PlaySound, Autostart: platform.Autostart,
-			SetAutostart: platform.SetAutostart, Replace: platform.Replace, Uninstall: platform.Uninstall},
+			SetAutostart: func(on bool) error { return platform.SetAutostart(launcher, on) }, Start: platform.Start,
+			Uninstall: platform.Uninstall},
 	}, nil
 }
 

@@ -26,13 +26,10 @@ func OpenURL(u string) error {
 func Autostart() bool { return false }
 
 // SetAutostart switches starting with the system.
-func SetAutostart(bool) error { return nil }
+func SetAutostart(string, bool) error { return nil }
 
 // PlaySound plays a sound class.
 func PlaySound(class string) { fmt.Fprint(os.Stderr, "\a") }
-
-// Replace is not supported outside Windows (nil in app.Platform).
-var Replace func(running, downloaded string) error
 
 // Uninstall is not supported outside Windows (nil in app.Platform).
 var Uninstall func() error
