@@ -70,9 +70,13 @@ func stripText(q queue.View) string {
 		return ""
 	}
 	if shown := len(q.Visible) - q.Calls; q.Browsing && shown > 0 {
-		return fmt.Sprintf("%d–%d из %d · колесо мыши листает", q.Offset+1, q.Offset+shown, q.Listed)
+		return fmt.Sprintf("%d–%d из %d · колесо листает", q.Offset+1, q.Offset+shown, q.Listed)
 	}
+	// the number of the strip is what is not on the screen; when everything is there, all of them
 	t := fmt.Sprintf("%d %s", q.Unread, plural(q.Unread, "уведомление", "уведомления", "уведомлений"))
+	if q.Hidden > 0 && q.Hidden < q.Unread {
+		t = fmt.Sprintf("Ещё %d %s", q.Hidden, plural(q.Hidden, "уведомление", "уведомления", "уведомлений"))
+	}
 	if q.DND {
 		t += " · не беспокоить"
 	}
