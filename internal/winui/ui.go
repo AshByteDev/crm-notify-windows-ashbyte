@@ -611,6 +611,8 @@ func (u *UI) hit(s *slot, x, y int32) int {
 		return hitClose
 	case in(read, x, y) && s.kind == "signin":
 		return hitLogin
+	case s.kind == "card" && s.card.Kind == queue.KindCall && (in(read, x, y) || (in(open, x, y) && s.card.URL == "")):
+		return hitNone // no such icon on a call
 	case in(read, x, y):
 		return hitRead
 	case in(open, x, y):
@@ -721,8 +723,8 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 					u.A.Q.Browse()
 				}
 				u.refresh()
-			} else if s.kind == "card" {
-				u.A.Open(s.card.Key)
+			} else if s.kind == "card" && (s.card.Kind != queue.KindCall || s.card.URL != "") {
+				u.A.Open(s.card.Key) // a call with no conversation has nowhere to go
 			}
 		case hitLogin:
 			u.A.Login(u.Ctx)
@@ -825,6 +827,8 @@ func (p painter) text(s string, r rect, font, color uintptr, flags uintptr) {
 
 func accent(c api.Card) uintptr {
 	switch {
+	case c.Kind == queue.KindCall:
+		return colGreen
 	case c.Mention:
 		return colOrange
 	case c.Sound == api.SoundClient:
@@ -870,14 +874,22 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 	p.fill(rect{0, u.pi(10), u.pi(4), h - u.pi(10)}, accent(s.card))
 	open, read, cl := u.buttons(s)
 	left := u.pi(14)
-	if t := clock(s.card.At); t != "" {
+	call := s.card.Kind == queue.KindCall
+	if call { // a call is now: a telephone in place of the time
+		p.text("☎", rect{left, 0, left + u.pi(24), u.pi(36)}, u.symbolFont(16), colGreen, dtSingleLine|dtVCenter)
+		left += u.pi(28)
+	} else if t := clock(s.card.At); t != "" {
 		p.text(t, rect{left, 0, left + u.pi(38), u.pi(36)}, u.font(12, false), colMuted, dtSingleLine|dtVCenter)
 		left += u.pi(42)
 	}
 	p.text(cardTitle(s.card), rect{left, 0, read.Left - u.pi(4), u.pi(36)}, u.font(13, true), colTitle, dtSingleLine|dtVCenter|dtEndEllipsis)
 	p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(70)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
-	u.icon(p, s, read, "✓", hitRead, colBlue)
-	u.icon(p, s, open, "↗", hitOpen, colBody)
+	if !call {
+		u.icon(p, s, read, "✓", hitRead, colBlue) // a call needs no «Прочитано» (contract §5.4)
+	}
+	if !call || s.card.URL != "" {
+		u.icon(p, s, open, "↗", hitOpen, colBody)
+	}
 	u.icon(p, s, cl, "✕", hitClose, colMuted)
 }
 
