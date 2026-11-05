@@ -186,7 +186,6 @@ func (a *App) Load() {
 	a.Server = a.cfg.Server
 	a.Q = queue.New()
 	a.Q.SetDND(a.cfg.DND)
-	a.applyShow()
 	a.state = NeedServer
 	if a.Server != "" {
 		a.api = api.New(a.Server, a.userAgent())
@@ -438,16 +437,27 @@ func (a *App) openRelease(page string) {
 	}
 }
 
-// Open opens the place of the card in the CRM; the card leaves the screen (reading there clears it everywhere).
+// Open opens the place of the card in the CRM. A card of the CRM stays until «Прочитано» or reading there (the CRM
+// clears it then); the page of a release ends its card.
 func (a *App) Open(key string) {
-	if c, ok := a.Q.Get(key); ok {
-		if key == UpdateKey {
-			a.openRelease(c.URL)
-		} else {
-			a.open(c.URL)
-		}
+	c, ok := a.Q.Get(key)
+	if !ok {
+		return
 	}
-	a.Q.Dismiss(key)
+	if key == UpdateKey {
+		a.openRelease(c.URL)
+		a.Q.Dismiss(key)
+		a.changed()
+		return
+	}
+	if c.URL != "" {
+		a.open(c.URL)
+	}
+}
+
+// HideAll is «Скрыть все»: the cards leave this computer only, the CRM is not told.
+func (a *App) HideAll() {
+	a.Q.HideAll()
 	a.changed()
 }
 

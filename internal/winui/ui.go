@@ -1,6 +1,6 @@
 //go:build windows
 
-// Package winui is the face of the app on Windows: the tray icon with its menu, up to three cards for a few seconds and
+// Package winui is the face of the app on Windows: the tray icon with its menu, up to three cards that stay until an action and
 // a strip with the number of unread ones at the edge of the screen (docs/APP_SPEC.md §3.1, §3.4). It draws with plain
 // Win32/GDI — no runtime to ship.
 package winui
@@ -25,8 +25,9 @@ const (
 	cardW    = 360
 	cardH    = 76  // the line of the sender and two lines of the message
 	serviceH = 116 // the cards with worded buttons
-	moreH    = 30
-	iconSize = 24
+	moreH    = 32
+	dot      = 20 // the coloured circles of a card (TZ: at least 16)
+	dotGap   = 8  // between them (TZ: at least 6)
 	gap      = 8
 	margin   = 12
 	radius   = 14
@@ -53,7 +54,11 @@ const (
 	cmdCancelLogin
 	cmdSettings
 	cmdReadAll
+	cmdHideAll
 )
+
+// «Прочитать все» asks first when it reads more than this.
+const confirmOver = 5
 
 // what a click hits on a card
 const (
@@ -63,6 +68,8 @@ const (
 	hitRead
 	hitClose
 	hitLogin
+	hitHideAll // the words of the strip
+	hitReadAll
 )
 
 // slot is one window of the stack: a card, the «sign in» card or the strip of the unread.
@@ -583,11 +590,17 @@ func service(s *slot) bool { return s.kind == "signin" || s.card.Key == app.Upda
 // geometry of a card (client coordinates)
 func (u *UI) buttons(s *slot) (open, read, close rect) {
 	w := u.pi(cardW)
-	if !service(s) { // the icons of the first line: «Прочитано», «Открыть», «✕»
-		size, top, step := u.pi(iconSize), u.pi(6), u.pi(iconSize+2)
-		close = rect{w - u.pi(8) - size, top, w - u.pi(8), top + size}
-		open = rect{close.Left - step, top, close.Right - step, top + size}
-		read = rect{open.Left - step, top, open.Right - step, top + size}
+	if !service(s) { // the circles of the first line, from the text: green «Прочитано», blue «Открыть в CRM», red «Закрыть»
+		size, top, step := u.pi(dot), u.pi(8), u.pi(dot+dotGap)
+		close = rect{w - u.pi(10) - size, top, w - u.pi(10), top + size}
+		next := close
+		if s.card.URL != "" { // nowhere to open: no blue circle
+			open = rect{next.Left - step, top, next.Right - step, top + size}
+			next = open
+		}
+		if s.card.Kind != queue.KindCall { // a call needs no «Прочитано» (contract §5.4)
+			read = rect{next.Left - step, top, next.Right - step, top + size}
+		}
 		return
 	}
 	h := u.pi(serviceH)
@@ -603,6 +616,13 @@ func (u *UI) buttons(s *slot) (open, read, close rect) {
 
 func (u *UI) hit(s *slot, x, y int32) int {
 	if s.kind == "more" {
+		hide, read := u.stripButtons(s)
+		switch {
+		case in(hide, x, y):
+			return hitHideAll
+		case in(read, x, y):
+			return hitReadAll
+		}
 		return hitBody
 	}
 	open, read, cl := u.buttons(s)
@@ -611,8 +631,6 @@ func (u *UI) hit(s *slot, x, y int32) int {
 		return hitClose
 	case in(read, x, y) && s.kind == "signin":
 		return hitLogin
-	case s.kind == "card" && s.card.Kind == queue.KindCall && (in(read, x, y) || (in(open, x, y) && s.card.URL == "")):
-		return hitNone // no such icon on a call
 	case in(read, x, y):
 		return hitRead
 	case in(open, x, y):
@@ -635,13 +653,38 @@ func holdKey(s *slot) string {
 	return ""
 }
 
+// stripButtons are the words «Скрыть все» and «Прочитать все» at the right of the strip.
+func (u *UI) stripButtons(s *slot) (hide, read rect) {
+	w, h := u.pi(cardW), u.pi(moreH)
+	read = rect{w - u.pi(10) - u.pi(stripReadW), 0, w - u.pi(10), h}
+	hide = rect{read.Left - u.pi(6) - u.pi(stripHideW), 0, read.Left - u.pi(6), h}
+	return
+}
+
+// the widths of the words of the strip
+const (
+	stripHideW = 78
+	stripReadW = 98
+)
+
+// readAll is «Прочитать все»: a question first when it is more than a few.
+func (u *UI) readAll() {
+	n := u.A.View().Queue.Unread
+	if n > confirmOver && !confirm(fmt.Sprintf("Отметить прочитанными все уведомления (%d)? Отменить это нельзя.", n)) {
+		return
+	}
+	u.A.ReadAll(u.Ctx)
+}
+
 // stripMenu is the right click on the strip.
 func (u *UI) stripMenu() {
 	n := u.A.View().Queue.Unread
 	h, _, _ := pCreatePopupMenu.Call()
 	defer pDestroyMenu.Call(h)
-	pAppendMenuW.Call(h, mfString, cmdOpenCRM, uintptr(unsafe.Pointer(utf16("Открыть AshCRM"))))
+	pAppendMenuW.Call(h, mfString, cmdHideAll, uintptr(unsafe.Pointer(utf16("Скрыть все"))))
 	pAppendMenuW.Call(h, mfString, cmdReadAll, uintptr(unsafe.Pointer(utf16(fmt.Sprintf("Прочитать все (%d)", n)))))
+	pAppendMenuW.Call(h, mfSeparator, 0, 0)
+	pAppendMenuW.Call(h, mfString, cmdOpenCRM, uintptr(unsafe.Pointer(utf16("Открыть AshCRM"))))
 	var p point
 	pGetCursorPos.Call(ptr(&p))
 	pSetForegroundWindow.Call(u.tray) // else the menu does not close on a click outside
@@ -650,10 +693,10 @@ func (u *UI) stripMenu() {
 	switch int(cmd) {
 	case cmdOpenCRM:
 		u.A.OpenCRM()
+	case cmdHideAll:
+		u.A.HideAll()
 	case cmdReadAll:
-		if confirm(fmt.Sprintf("Отметить прочитанными все уведомления (%d)? Отменить это нельзя.", n)) {
-			u.A.ReadAll(u.Ctx)
-		}
+		u.readAll()
 	}
 }
 
@@ -723,9 +766,13 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 					u.A.Q.Browse()
 				}
 				u.refresh()
-			} else if s.kind == "card" && (s.card.Kind != queue.KindCall || s.card.URL != "") {
-				u.A.Open(s.card.Key) // a call with no conversation has nowhere to go
+			} else if s.kind == "card" {
+				u.A.Open(s.card.Key) // a card with no path has nowhere to go: Open does nothing
 			}
+		case hitHideAll:
+			u.A.HideAll()
+		case hitReadAll:
+			u.readAll()
 		case hitLogin:
 			u.A.Login(u.Ctx)
 		}
@@ -756,19 +803,24 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 // ---- painting ----
 
 var (
-	colBg      = rgb(0xFF, 0xFF, 0xFF)
-	colBorder  = rgb(0xDD, 0xE3, 0xEA)
-	colTitle   = rgb(0x14, 0x18, 0x1D)
-	colBody    = rgb(0x45, 0x4C, 0x55)
-	colMuted   = rgb(0x8A, 0x93, 0x9E)
-	colBlue    = rgb(0x33, 0x90, 0xEC)
-	colGreen   = rgb(0x2E, 0xAD, 0x5B)
-	colOrange  = rgb(0xF0, 0x9A, 0x1A)
-	colBtn     = rgb(0xEE, 0xF1, 0xF5)
-	colBtnHov  = rgb(0xE1, 0xE6, 0xEC)
-	colBlueHov = rgb(0x24, 0x7C, 0xD6)
-	colMoreBg  = rgb(0x2B, 0x31, 0x38)
-	colWhite   = rgb(0xFF, 0xFF, 0xFF)
+	colBg       = rgb(0xFF, 0xFF, 0xFF)
+	colBorder   = rgb(0xDD, 0xE3, 0xEA)
+	colTitle    = rgb(0x14, 0x18, 0x1D)
+	colBody     = rgb(0x45, 0x4C, 0x55)
+	colMuted    = rgb(0x8A, 0x93, 0x9E)
+	colBlue     = rgb(0x33, 0x90, 0xEC)
+	colGreen    = rgb(0x2E, 0xAD, 0x5B)
+	colOrange   = rgb(0xF0, 0x9A, 0x1A)
+	colBtn      = rgb(0xEE, 0xF1, 0xF5)
+	colBtnHov   = rgb(0xE1, 0xE6, 0xEC)
+	colBlueHov  = rgb(0x24, 0x7C, 0xD6)
+	colGreenHov = rgb(0x23, 0x8F, 0x4A)
+	colRed      = rgb(0xE0, 0x45, 0x45)
+	colRedHov   = rgb(0xC2, 0x33, 0x33)
+	colHint     = rgb(0x2B, 0x31, 0x38)
+	colMoreHov  = rgb(0x45, 0x4C, 0x55)
+	colMoreBg   = rgb(0x2B, 0x31, 0x38)
+	colWhite    = rgb(0xFF, 0xFF, 0xFF)
 )
 
 func (u *UI) font(size int, bold bool) uintptr {
@@ -863,7 +915,18 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 	w, h := cr.Right, cr.Bottom
 	if s.kind == "more" {
 		p.fill(cr, colMoreBg)
-		p.text(s.text, rect{u.pi(14), 0, w - u.pi(14), h}, u.font(12, false), colWhite, dtSingleLine|dtVCenter|dtEndEllipsis|dtCenter)
+		hide, read := u.stripButtons(s)
+		p.text(s.text, rect{u.pi(14), 0, hide.Left - u.pi(6), h}, u.font(12, false), colWhite, dtSingleLine|dtVCenter|dtEndEllipsis)
+		for _, b := range []struct {
+			r     rect
+			label string
+			hit   int
+		}{{hide, "Скрыть все", hitHideAll}, {read, "Прочитать все", hitReadAll}} {
+			if s.hover == b.hit {
+				p.round(rect{b.r.Left, b.r.Top + u.pi(4), b.r.Right, b.r.Bottom - u.pi(4)}, colMoreHov, colMoreHov, u.pi(8))
+			}
+			p.text(b.label, b.r, u.font(12, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
+		}
 		return
 	}
 	p.round(rect{0, 0, w, h}, colBg, colBorder, u.pi(radius))
@@ -882,24 +945,48 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 		p.text(t, rect{left, 0, left + u.pi(38), u.pi(36)}, u.font(12, false), colMuted, dtSingleLine|dtVCenter)
 		left += u.pi(42)
 	}
-	p.text(cardTitle(s.card), rect{left, 0, read.Left - u.pi(4), u.pi(36)}, u.font(13, true), colTitle, dtSingleLine|dtVCenter|dtEndEllipsis)
+	first := cl.Left // the leftmost circle
+	for _, r := range []rect{open, read} {
+		if r.Right > 0 {
+			first = r.Left
+		}
+	}
+	p.text(cardTitle(s.card), rect{left, 0, first - u.pi(6), u.pi(36)}, u.font(13, true), colTitle, dtSingleLine|dtVCenter|dtEndEllipsis)
 	p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(70)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
-	if !call {
-		u.icon(p, s, read, "✓", hitRead, colBlue) // a call needs no «Прочитано» (contract §5.4)
+	u.circle(p, s, read, "✓", hitRead, colGreen, colGreenHov)
+	u.circle(p, s, open, "↗", hitOpen, colBlue, colBlueHov)
+	u.circle(p, s, cl, "✕", hitClose, colRed, colRedHov)
+	if hint := hintOf(s.hover); hint != "" { // the words of the circle under the mouse, over the end of the title
+		at := rect{first - u.pi(118), u.pi(8), first - u.pi(6), u.pi(8 + dot)}
+		p.round(at, colHint, colHint, u.pi(8))
+		p.text(hint, at, u.font(12, false), colWhite, dtSingleLine|dtVCenter|dtCenter)
 	}
-	if !call || s.card.URL != "" {
-		u.icon(p, s, open, "↗", hitOpen, colBody)
-	}
-	u.icon(p, s, cl, "✕", hitClose, colMuted)
 }
 
-// icon is a button of the first line of a card.
-func (u *UI) icon(p painter, s *slot, r rect, glyph string, hit int, color uintptr) {
-	if s.hover == hit {
-		p.round(r, colBtnHov, colBtnHov, u.pi(8))
-		color = colTitle
+// circle is a button of the first line of a card: a coloured circle with a white sign (not only the colour tells them
+// apart). An empty rect — no such button on this card.
+func (u *UI) circle(p painter, s *slot, r rect, glyph string, hit int, color, hover uintptr) {
+	if r.Right == 0 {
+		return
 	}
-	p.text(glyph, r, u.symbolFont(14), color, dtSingleLine|dtVCenter|dtCenter)
+	if s.hover == hit {
+		color = hover
+	}
+	p.round(r, color, color, r.Right-r.Left)
+	p.text(glyph, r, u.symbolFont(10), colWhite, dtSingleLine|dtVCenter|dtCenter)
+}
+
+// hintOf is the word of a circle.
+func hintOf(hit int) string {
+	switch hit {
+	case hitRead:
+		return "Прочитано"
+	case hitOpen:
+		return "Открыть в CRM"
+	case hitClose:
+		return "Закрыть"
+	}
+	return ""
 }
 
 // drawService is the card «Войдите» or «Доступна версия»: a decision, so its buttons are in words.

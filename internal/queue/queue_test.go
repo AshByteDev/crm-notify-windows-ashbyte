@@ -22,7 +22,19 @@ func keys(v View) string {
 	return s
 }
 
-func TestThreeOnScreenRestWait(t *testing.T) {
+// later is a moment far beyond every timer of the queue but a lost call.
+func later() time.Time { return time.Now().Add(time.Minute) }
+
+func filled(n int) *Manager {
+	m := New()
+	for i := 1; i <= n; i++ {
+		m.Card(card(fmt.Sprint("c", i), 1, i))
+	}
+	return m
+}
+
+// Five messages: the newest three on the screen, the strip counts two; nothing leaves by itself (acceptance 1, 5).
+func TestNewestThreeStay(t *testing.T) {
 	m := New()
 	for i := 1; i <= 5; i++ {
 		if snd := m.Card(card(fmt.Sprint("c", i), 1, i)); snd != api.SoundOther {
@@ -30,37 +42,41 @@ func TestThreeOnScreenRestWait(t *testing.T) {
 		}
 	}
 	v := m.View()
-	if keys(v) != "c3 c2 c1 " || v.Waiting != 2 { // c4, c5 wait
-		t.Fatalf("visible %q waiting %d", keys(v), v.Waiting)
+	if keys(v) != "c5 c4 c3 " || v.Hidden != 2 || v.Unread != 5 || !v.Next.IsZero() {
+		t.Fatalf("%q %+v", keys(v), v)
 	}
-	// a place frees up → the next waiting card comes to the bottom
-	m.Clear("c2")
-	if v := m.View(); keys(v) != "c5 c3 c1 " || v.Waiting != 1 { // the newest waiting first
-		t.Fatalf("after clear: %q %d", keys(v), v.Waiting)
+	m.Tick(time.Now().Add(10 * time.Minute))
+	if keys(m.View()) != "c5 c4 c3 " {
+		t.Fatal("a card left by itself")
+	}
+	// a place frees up → the newest of the strip comes back
+	m.Dismiss("c4")
+	if v := m.View(); keys(v) != "c5 c3 c2 " || v.Hidden != 1 {
+		t.Fatalf("after closing: %q %d", keys(v), v.Hidden)
 	}
 }
 
-func TestSameKeyReplacesAndSoundsOnlyForMore(t *testing.T) {
-	m := New()
-	m.Card(card("chat-a", 1, 0))
-	if snd := m.Card(card("chat-a", 2, 1)); snd == "" {
+// A newer message of a chat brings its card to the edge with a sound (TZ §2.4); the same count — quietly.
+func TestNewerMessageRaisesCard(t *testing.T) {
+	m := filled(5)
+	if snd := m.Card(card("c1", 2, 9)); snd == "" {
 		t.Error("one more unread: sound")
 	}
-	if snd := m.Card(card("chat-a", 2, 2)); snd != "" {
-		t.Error("the same count: no sound")
+	if keys(m.View()) != "c1 c5 c4 " {
+		t.Fatal(keys(m.View()))
 	}
-	v := m.View()
-	if len(v.Visible) != 1 || v.Visible[0].Count != 2 {
-		t.Fatalf("%+v", v)
+	if snd := m.Card(card("c3", 1, 3)); snd != "" || keys(m.View()) != "c1 c5 c4 " {
+		t.Fatalf("a repeat: %q %q", snd, keys(m.View()))
 	}
-	c := card("q", 0, 3)
+	c := card("q", 0, 10)
 	c.Sound = api.SoundClient
 	if snd := m.Card(c); snd != api.SoundClient {
 		t.Errorf("client sound: %q", snd)
 	}
 }
 
-func TestSyncDropsReadAndKeepsDismissed(t *testing.T) {
+// «Закрыть» removes the card here only; the next message brings it back (acceptance 2).
+func TestDismissComesBackWithNews(t *testing.T) {
 	m := New()
 	m.Card(card("a", 1, 1))
 	m.Card(card("b", 1, 2))
@@ -68,29 +84,32 @@ func TestSyncDropsReadAndKeepsDismissed(t *testing.T) {
 	if keys(m.View()) != "b " {
 		t.Fatal(keys(m.View()))
 	}
-	// the server still has «a» (not read) — it stays dismissed; «b» was read elsewhere
+	// the server still has «a» (not read) — it stays dismissed; «b» was read elsewhere (acceptance 4)
 	m.Sync(api.Snapshot{Cards: []api.Card{card("a", 1, 1)}, Total: 1})
-	if keys(m.View()) != "" {
-		t.Fatal(keys(m.View()))
+	if v := m.View(); keys(v) != "" || v.Unread != 0 {
+		t.Fatalf("%q %d", keys(v), v.Unread)
 	}
-	// a newer message in «a» brings it back
-	m.Sync(api.Snapshot{Cards: []api.Card{card("a", 2, 5)}, Total: 1})
+	if snd := m.Card(card("a", 2, 5)); snd == "" || keys(m.View()) != "a " {
+		t.Fatalf("back: %q %q", snd, keys(m.View()))
+	}
+	m.Dismiss("a")
+	m.Sync(api.Snapshot{Cards: []api.Card{card("a", 3, 6)}, Total: 1})
 	if keys(m.View()) != "a " {
-		t.Fatal(keys(m.View()))
+		t.Fatal("a newer state in a sync brings it back too")
 	}
 }
 
-func TestSyncAfterReconnect(t *testing.T) {
+func TestSnapshotNewestAtTheEdge(t *testing.T) {
 	m := New()
 	m.Card(card("old", 1, 0))
 	cards := []api.Card{}
-	for i := 20; i >= 1; i-- { // newest first, like the server
+	for _, i := range []int{3, 20, 7, 1, 15} { // any order
 		cards = append(cards, card(fmt.Sprint("n", i), 1, i))
 	}
-	m.Sync(api.Snapshot{Cards: cards, Total: 27})
+	m.Sync(api.Snapshot{Cards: cards, Total: 12})
 	v := m.View()
-	if keys(v) != "n20 n19 n18 " || v.Waiting != 17 || v.More != 7 {
-		t.Fatalf("%q waiting %d more %d", keys(v), v.Waiting, v.More)
+	if keys(v) != "n20 n15 n7 " || v.More != 7 || v.Hidden != 9 || v.Unread != 12 {
+		t.Fatalf("%q %+v", keys(v), v)
 	}
 	if _, ok := m.Get("old"); ok {
 		t.Error("a card the server no longer has is dropped")
@@ -103,35 +122,52 @@ func TestSyncKeepsLocalCards(t *testing.T) {
 	m.Local(card("update", 0, 1))
 	m.Card(card("a", 1, 2))
 	m.Sync(api.Snapshot{})
-	if keys(m.View()) != "update " {
-		t.Fatal(keys(m.View()))
+	if v := m.View(); keys(v) != "update " || v.Unread != 0 {
+		t.Fatal(keys(v))
 	}
 	m.Dismiss("update") // «Позже»
 	m.Sync(api.Snapshot{})
 	if keys(m.View()) != "" {
 		t.Fatal(keys(m.View()))
 	}
-	m.Local(card("update", 0, 3)) // the next daily check
+	m.Local(card("update", 0, 3)) // the next check
 	if keys(m.View()) != "update " {
+		t.Fatal(keys(m.View()))
+	}
+}
+
+// A card of the app pushed off by messages comes back when a place frees.
+func TestLocalCardComesBack(t *testing.T) {
+	m := New()
+	m.Local(card("update", 0, 1))
+	m.Card(card("a", 1, 2))
+	m.Card(card("b", 1, 3))
+	m.Card(card("c", 1, 4))
+	if keys(m.View()) != "c b a " {
+		t.Fatal(keys(m.View()))
+	}
+	m.Dismiss("b")
+	if keys(m.View()) != "c a update " {
 		t.Fatal(keys(m.View()))
 	}
 }
 
 func TestDND(t *testing.T) {
 	m := New()
+	m.Card(card("before", 1, 0))
 	m.SetDND(true)
 	if snd := m.Card(card("a", 1, 1)); snd != "" {
 		t.Error("no sound in DND")
 	}
-	if v := m.View(); len(v.Visible) != 0 || v.Waiting != 1 || !v.DND {
-		t.Fatalf("%+v", v)
+	if v := m.View(); keys(v) != "before " || v.Waiting != 1 || !v.DND || v.Unread != 2 {
+		t.Fatalf("%q %+v", keys(v), v)
 	}
 	m.SetDND(false)
-	if keys(m.View()) != "a " {
+	if keys(m.View()) != "a before " {
 		t.Fatal("shown after DND")
 	}
 	m.Reset()
-	if v := m.View(); len(v.Visible) != 0 || v.Waiting != 0 {
+	if v := m.View(); len(v.Visible) != 0 || v.Waiting != 0 || v.Unread != 0 {
 		t.Fatal("reset")
 	}
 }
@@ -141,124 +177,36 @@ func TestMemoryIsBounded(t *testing.T) {
 	for i := 0; i < MaxKept+50; i++ {
 		m.Card(card(fmt.Sprint("k", i), 1, i))
 	}
-	if v := m.View(); len(v.Visible)+v.Waiting != MaxKept {
-		t.Fatalf("kept %d", len(v.Visible)+v.Waiting)
+	v := m.View()
+	if v.Unread != MaxKept || keys(v) != fmt.Sprintf("k%d k%d k%d ", MaxKept+49, MaxKept+48, MaxKept+47) {
+		t.Fatalf("kept %d, %q", v.Unread, keys(v))
 	}
-	if _, ok := m.Get(fmt.Sprint("k", MaxKept+49)); !ok {
-		t.Fatal("the newest card is kept")
-	}
-}
-
-func later(n int) time.Time { return time.Now().Add(time.Duration(n) * (Show + time.Second)) }
-
-// Cards leave the screen after Show but stay unread; the waiting ones follow in groups of three.
-func TestCardsHideAndNextShow(t *testing.T) {
-	m := New()
-	for i := 1; i <= 5; i++ {
-		m.Card(card(fmt.Sprint("c", i), 1, i))
-	}
-	if v := m.View(); v.Unread != 5 || v.Next.IsZero() {
-		t.Fatalf("%+v", v)
-	}
-	m.Tick(time.Now())
-	if keys(m.View()) != "c3 c2 c1 " {
-		t.Fatal("the time has not ended")
-	}
-	m.Tick(later(1))
-	if v := m.View(); keys(v) != "c5 c4 " || v.Waiting != 0 || v.Unread != 5 {
-		t.Fatalf("%q %+v", keys(v), v)
-	}
-	m.Tick(later(2))
-	if v := m.View(); keys(v) != "" || v.Unread != 5 || !v.Next.IsZero() {
-		t.Fatalf("%q %+v", keys(v), v)
-	}
-	m.Clear("c1")
-	if v := m.View(); v.Unread != 4 {
-		t.Fatalf("read elsewhere: %+v", v)
+	if _, ok := m.Get("k0"); ok {
+		t.Fatal("the oldest goes first")
 	}
 }
 
-// A hidden card returns only with something new: repeated delivery and the state of the server do not show it again.
-func TestHiddenCardReturnsWhenNewer(t *testing.T) {
-	m := New()
-	m.Card(card("a", 1, 1))
-	m.Tick(later(1))
-	m.Card(card("a", 1, 1))
-	m.Sync(api.Snapshot{Cards: []api.Card{card("a", 1, 1)}, Total: 1})
-	if v := m.View(); keys(v) != "" || v.Unread != 1 {
-		t.Fatalf("%q %+v", keys(v), v)
-	}
-	if snd := m.Card(card("a", 2, 2)); snd == "" {
-		t.Error("a new message sounds")
-	}
-	if keys(m.View()) != "a " {
-		t.Fatal(keys(m.View()))
-	}
-}
-
-// A newer message in a visible card gives it the full time again.
-func TestNewerCardExtendsTime(t *testing.T) {
-	m := New()
-	m.Card(card("a", 1, 1))
-	before := m.View().Next
-	time.Sleep(5 * time.Millisecond)
-	m.Card(card("a", 2, 2))
-	if !m.View().Next.After(before) {
-		t.Fatal("the time is not extended")
-	}
-}
-
-func TestHoldKeepsCard(t *testing.T) {
-	m := New()
-	m.Card(card("a", 1, 1))
-	m.Card(card("b", 1, 2))
-	if !m.Hold("a", true) || m.Hold("a", true) {
-		t.Fatal("hold reports a change once")
-	}
-	m.Tick(later(1))
-	if keys(m.View()) != "a " {
-		t.Fatal(keys(m.View()))
-	}
-	if !m.View().Next.IsZero() {
-		t.Fatal("a held card has no end")
-	}
-	if m.Hold("b", false) {
-		t.Fatal("not the held card")
-	}
-	if !m.Hold("a", false) {
-		t.Fatal("release")
-	}
-	m.Tick(time.Now())
-	if keys(m.View()) != "a " {
-		t.Fatal("full time after the mouse leaves")
-	}
-	m.Tick(later(1))
-	if keys(m.View()) != "" {
-		t.Fatal(keys(m.View()))
-	}
-}
-
-func TestLocalCardsStayUntilAction(t *testing.T) {
-	m := New()
-	m.Local(card("update", 0, 1))
-	m.Tick(later(1))
-	if v := m.View(); keys(v) != "update " || v.Unread != 0 || !v.Next.IsZero() {
-		t.Fatalf("%q %+v", keys(v), v)
-	}
-}
-
-// A check is not an unread message: neither the one of the settings nor test-<uuid> of the CRM.
+// A check is not an unread message: neither the one of the settings nor test-<uuid> of the CRM. It is the only card
+// that leaves by itself, and only after it has been seen.
 func TestCheckLeavesForGood(t *testing.T) {
 	m := New()
 	own, crm := card("test", 0, 1), card("test-1", 0, 2)
 	own.Kind, crm.Kind = KindTest, KindTest
 	m.Local(own)
 	m.Card(crm)
-	if v := m.View(); len(v.Visible) != 2 || v.Unread != 0 {
+	if v := m.View(); len(v.Visible) != 2 || v.Unread != 0 || v.Hidden != 0 || v.Next.IsZero() {
 		t.Fatalf("%+v", v)
 	}
-	m.Tick(later(1))
-	if v := m.View(); len(v.Visible) != 0 || v.Unread != 0 {
+	if !m.Hold("test", true) {
+		t.Fatal("a check is held under the mouse")
+	}
+	m.Tick(later())
+	if keys(m.View()) != "test " {
+		t.Fatal(keys(m.View()))
+	}
+	m.Hold("test", false)
+	m.Tick(later())
+	if v := m.View(); len(v.Visible) != 0 || !v.Next.IsZero() {
 		t.Fatalf("%+v", v)
 	}
 	if _, ok := m.Get("test"); ok {
@@ -266,58 +214,57 @@ func TestCheckLeavesForGood(t *testing.T) {
 	}
 }
 
-func TestUnreadCountsServerRest(t *testing.T) {
+func TestCheckWaitsForDND(t *testing.T) {
 	m := New()
-	m.Sync(api.Snapshot{Cards: []api.Card{card("a", 1, 1)}, Total: 8})
-	if v := m.View(); v.Unread != 8 {
+	m.SetDND(true)
+	c := card("test", 0, 1)
+	c.Kind = KindTest
+	m.Local(c)
+	m.Tick(later())
+	if v := m.View(); v.Waiting != 1 || !v.Next.IsZero() {
 		t.Fatalf("%+v", v)
 	}
+	m.SetDND(false)
+	if keys(m.View()) != "test " {
+		t.Fatal("the check is seen after DND")
+	}
 }
 
-func TestHiddenCardsAreBounded(t *testing.T) {
+// «Скрыть все» empties the screen and the strip here; a new message comes as usual (acceptance 6).
+func TestHideAll(t *testing.T) {
 	m := New()
-	for i := 0; i < MaxKept+50; i++ {
-		m.Card(card(fmt.Sprint("k", i), 1, i))
-		if i%Max == 0 {
-			m.Tick(later(i + 1))
-		}
+	cards := []api.Card{}
+	for i := 1; i <= 5; i++ {
+		cards = append(cards, card(fmt.Sprint("c", i), 1, i))
 	}
-	if v := m.View(); v.Unread != MaxKept {
-		t.Fatalf("kept %d", v.Unread)
+	m.Sync(api.Snapshot{Cards: cards, Total: 9})
+	m.Local(card("update", 0, 0))
+	m.Browse()
+	m.HideAll()
+	v := m.View()
+	if keys(v) != "update " || v.Unread != 0 || v.Hidden != 0 || v.Browsing {
+		t.Fatalf("%q %+v", keys(v), v)
+	}
+	m.Sync(api.Snapshot{Cards: cards, Total: 9}) // the next sync: still hidden
+	if v := m.View(); v.Unread != 0 {
+		t.Fatalf("%+v", v)
+	}
+	m.Sync(api.Snapshot{Cards: cards[:4], Total: 6}) // read in the CRM
+	if v := m.View(); v.Unread != 0 {
+		t.Fatalf("%+v", v)
+	}
+	m.Card(card("c1", 2, 9))
+	if v := m.View(); keys(v) != "c1 update " || v.Unread != 1 {
+		t.Fatalf("%q %+v", keys(v), v)
 	}
 }
 
-func TestSetShow(t *testing.T) {
-	m := New()
-	m.SetShow(time.Hour)
-	m.Card(card("a", 1, 1))
-	m.Tick(later(1))
-	if keys(m.View()) != "a " {
-		t.Fatal("the time of the settings")
-	}
-	m.SetShow(0)
-	m.Card(card("b", 1, 2))
-	if d := time.Until(m.until["b"]); d > Show {
-		t.Fatal("nothing set — the default", d)
-	}
-}
-
-func filled(n int) *Manager {
-	m := New()
-	for i := 1; i <= n; i++ {
-		m.Card(card(fmt.Sprint("c", i), 1, i))
-	}
-	return m
-}
-
-// The list shows the newest three of everything unread, shown before or not, and stops the timers.
+// The list shows the newest three of everything unread, the wheel moves it.
 func TestBrowse(t *testing.T) {
 	m := filled(5)
-	m.Tick(later(1))
-	m.Tick(later(2))
 	m.Browse()
 	v := m.View()
-	if keys(v) != "c5 c4 c3 " || !v.Browsing || v.Listed != 5 || v.Waiting != 0 {
+	if keys(v) != "c5 c4 c3 " || !v.Browsing || v.Listed != 5 || !v.Next.After(time.Now()) {
 		t.Fatalf("%q %+v", keys(v), v)
 	}
 	m.Scroll(1)
@@ -334,23 +281,24 @@ func TestBrowse(t *testing.T) {
 	}
 }
 
+// The list closes when the mouse has left it; the newest cards are on the screen again.
 func TestBrowseEndsWithoutMouse(t *testing.T) {
-	m := filled(2)
+	m := filled(4)
 	m.Browse()
+	m.Scroll(1)
 	if !m.Hold(StripKey, true) {
 		t.Fatal("the strip holds the list")
 	}
 	if !m.View().Next.IsZero() {
 		t.Fatal("no end under the mouse")
 	}
-	m.Tick(later(1))
+	m.Tick(later())
 	if !m.View().Browsing {
 		t.Fatal("the mouse is there")
 	}
 	m.Hold(StripKey, false)
-	m.Tick(later(1))
-	v := m.View()
-	if v.Browsing || keys(v) != "" || v.Unread != 2 {
+	m.Tick(later())
+	if v := m.View(); v.Browsing || keys(v) != "c4 c3 c2 " || v.Unread != 4 {
 		t.Fatalf("%q %+v", keys(v), v)
 	}
 }
@@ -370,7 +318,7 @@ func TestBrowseActions(t *testing.T) {
 	}
 }
 
-// A new message during the list joins it and is shown as usual afterwards.
+// A new message during the list joins it at the top.
 func TestNewCardDuringBrowse(t *testing.T) {
 	m := filled(1)
 	m.Browse()
@@ -379,7 +327,7 @@ func TestNewCardDuringBrowse(t *testing.T) {
 		t.Fatal(keys(m.View()))
 	}
 	m.EndBrowse()
-	if keys(m.View()) != "new " {
+	if keys(m.View()) != "new c1 " {
 		t.Fatal(keys(m.View()))
 	}
 }
@@ -393,7 +341,7 @@ func TestBrowseLeavesLocalCards(t *testing.T) {
 		t.Fatal(keys(m.View()))
 	}
 	m.EndBrowse()
-	if keys(m.View()) != "update " {
+	if keys(m.View()) != "update c1 " {
 		t.Fatal(keys(m.View()))
 	}
 }
@@ -414,30 +362,31 @@ func TestUnreadBefore(t *testing.T) {
 	}
 }
 
+func TestUnreadCountsServerRest(t *testing.T) {
+	m := New()
+	m.Sync(api.Snapshot{Cards: []api.Card{card("a", 1, 1)}, Total: 8})
+	if v := m.View(); v.Unread != 8 || v.Hidden != 7 {
+		t.Fatalf("%+v", v)
+	}
+}
+
 func call(key string) api.Card {
 	return api.Card{Key: key, Kind: KindCall, Title: "Звонит: " + key, At: t0, Sound: api.SoundClient}
 }
 
-// A call comes at once to the edge, the farthest card gives its place; it has no timer and is not unread.
+// A call comes at once to the edge, before newer cards; it is not unread.
 func TestCallComesFirst(t *testing.T) {
-	m := New()
-	for i := 1; i <= 3; i++ {
-		m.Card(card(fmt.Sprint("c", i), 1, i))
-	}
+	m := filled(3)
 	if snd := m.Card(call("ring-1")); snd != api.SoundClient {
 		t.Fatalf("sound %q", snd)
 	}
+	m.Card(card("c4", 1, 4))
 	v := m.View()
-	if keys(v) != "ring-1 c3 c2 " || v.Unread != 3 || v.Waiting != 0 {
-		t.Fatalf("%q unread %d waiting %d", keys(v), v.Unread, v.Waiting)
+	if keys(v) != "ring-1 c4 c3 " || v.Unread != 4 || v.Hidden != 2 || v.Calls != 1 {
+		t.Fatalf("%q %+v", keys(v), v)
 	}
-	m.Tick(time.Now().Add(time.Minute)) // the messages leave, the call stays
-	if v := m.View(); keys(v) != "ring-1 " {
-		t.Fatalf("after their time: %q", keys(v))
-	}
-	m.Card(call("ring-1")) // the same call again: no second sound
 	if snd := m.Card(call("ring-1")); snd != "" {
-		t.Fatalf("again: %q", snd)
+		t.Fatalf("the same call again: %q", snd)
 	}
 }
 
@@ -449,8 +398,12 @@ func TestCallStaysUntilClear(t *testing.T) {
 	if _, ok := m.Get("ring-1"); !ok {
 		t.Fatal("dropped by the sync")
 	}
+	m.HideAll()
+	if _, ok := m.Get("ring-1"); !ok {
+		t.Fatal("«Скрыть все» is about messages")
+	}
 	m.Clear("ring-1")
-	if v := m.View(); keys(v) != "c1 " {
+	if v := m.View(); keys(v) != "" {
 		t.Fatalf("%q", keys(v))
 	}
 }
@@ -470,40 +423,19 @@ func TestCallEndsByItself(t *testing.T) {
 
 // A call closes the list from the strip; a call on the screen keeps its place when the list opens.
 func TestCallAndList(t *testing.T) {
-	m := New()
-	for i := 1; i <= 5; i++ {
-		m.Card(card(fmt.Sprint("c", i), 1, i))
-	}
+	m := filled(5)
 	m.Browse()
 	m.Card(call("ring-1"))
-	v := m.View()
-	if v.Browsing || keys(v)[:7] != "ring-1 " {
+	if v := m.View(); v.Browsing || keys(v) != "ring-1 c5 c4 " {
 		t.Fatalf("browsing %v %q", v.Browsing, keys(v))
 	}
 	m.Browse()
-	v = m.View()
+	v := m.View()
 	if !v.Browsing || keys(v) != "ring-1 c5 c4 " || v.Calls != 1 {
 		t.Fatalf("list %q calls %d", keys(v), v.Calls)
 	}
 	m.Scroll(10)
 	if v := m.View(); keys(v) != "ring-1 c2 c1 " {
 		t.Fatalf("the end of the list %q", keys(v))
-	}
-}
-
-// A call does not push a card of the app away for good.
-func TestCallKeepsLocalCard(t *testing.T) {
-	m := New()
-	m.Local(api.Card{Key: "update", Title: "Доступна версия"})
-	m.Card(card("c1", 1, 1))
-	m.Card(card("c2", 1, 2))
-	m.Card(call("ring-1"))
-	if v := m.View(); keys(v) != "ring-1 c2 c1 " {
-		t.Fatalf("%q", keys(v))
-	}
-	m.Clear("ring-1")
-	m.Tick(time.Now().Add(time.Minute))
-	if v := m.View(); keys(v) != "update " {
-		t.Fatalf("after the call: %q", keys(v))
 	}
 }

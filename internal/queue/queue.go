@@ -1,6 +1,6 @@
-// Package queue keeps the cards of the app: at most Max on the screen (the newest at the edge), each for Show, the rest
-// wait in memory; a card that has been shown stays unread until the CRM clears it. A card is replaced by its key, never
-// duplicated (docs/APP_SPEC.md §3.3–3.5).
+// Package queue keeps the cards of the app. A card stays until someone removes it: «Прочитано», «Закрыть», «Скрыть
+// все» or the CRM (notify.clear, notify.sync). At most Max are on the screen, the newest at the edge; the rest are counted
+// by the strip and come up when a place frees. A card is replaced by its key, never duplicated (docs/APP_SPEC.md).
 package queue
 
 import (
@@ -15,39 +15,43 @@ import (
 // Max is the number of cards on the screen at once (decision of the owner).
 const Max = 3
 
-// Show is how long a card stays on the screen by default (config.json changes it). Cards of the app that need an action
-// have no limit; a card under the mouse waits.
-const Show = 5 * time.Second
+// TestFor is how long a check of the notifications stays: the only card that leaves by itself.
+const TestFor = 5 * time.Second
+
+// ListFor: the list opened from the strip closes when the mouse has been away from it this long.
+const ListFor = 5 * time.Second
 
 // StripKey stands for the strip in Hold.
 const StripKey = "strip"
 
 // KindTest is a check of the notifications: of the settings or of the CRM (contract §5.6). It proves the way, it is not
-// an unread message: it is not counted and leaves for good when its time ends.
+// an unread message: it is not counted and leaves for good after TestFor.
 const KindTest = "test"
 
-// KindCall is a client calling right now (contract 1.3, key ring-…): it shows at once, in front of the others, and
-// stays until the CRM clears it (an answer or the end of the call). It is not in the snapshot, so a snapshot or
-// notify.sync does not drop it; it is not an unread message either.
+// KindCall is a client calling right now (contract 1.3, key ring-…): it comes before the other cards and stays until the
+// CRM clears it (an answer or the end of the call). It is not in the snapshot, so a snapshot or notify.sync does not drop
+// it; it is not an unread message either.
 const KindCall = "call"
 
 // CallFor is how long a call stays at most: the clear of the CRM may be lost with a broken connection.
 const CallFor = 3 * time.Minute
 
-// MaxKept bounds the memory: beyond it the oldest waiting cards are dropped (they stay unread in the CRM).
+// MaxKept bounds the memory: beyond it the oldest cards are dropped (they stay unread in the CRM).
 const MaxKept = 500
 
 // View is what the screen shows.
 type View struct {
-	// Visible from the edge of the screen: Visible[0] is the closest to it (the newest shown).
+	// Visible from the edge of the screen: Visible[0] is the closest to it (a call or the newest card).
 	Visible []api.Card
-	// Waiting: received cards that wait for a free place.
+	// Waiting: cards that came during «Не беспокоить» and are not shown yet.
 	Waiting int
 	// More: cards the server has beyond the ones sent to the app («ещё N — откройте CRM»).
 	More int
 	// Unread: everything unread, on the screen or not, More included.
 	Unread int
-	// Next: when the next card leaves the screen (zero — none is timed).
+	// Hidden: the unread ones that are not on the screen — the number of the strip.
+	Hidden int
+	// Next: when something must change by itself (a check leaves, a lost call ends, the list closes); zero — never.
 	Next time.Time
 	// Browsing: the person opened the list from the strip; Visible is a window of it, Offset cards from the newest.
 	Browsing bool
@@ -62,139 +66,105 @@ type View struct {
 type Manager struct {
 	mu        sync.Mutex
 	cards     map[string]api.Card
+	order     map[string]int64     // when the current state of a card came: the newest is at the edge
+	last      int64                // the last order given
 	visible   []string             // the edge of the screen first
-	waiting   []string             // first come, first shown
-	seen      []string             // shown and gone from the screen, still unread; the oldest first
-	until     map[string]time.Time // when a visible card leaves the screen
+	local     map[string]bool      // cards of the app itself: the state of the server says nothing about them
+	calls     map[string]time.Time // calls and when they leave at the latest
+	tests     map[string]time.Time // checks and when they leave (zero — not shown yet)
+	dismissed map[string]time.Time // removed here: they come back only with a newer state
 	held      string               // the card under the mouse
-	show      time.Duration        // how long a card stays on the screen
 	browsing  bool                 // the list opened from the strip
 	offset    int                  // the first card of the list on the screen
 	browseEnd time.Time            // the list closes after the mouse has left it
-	dismissed map[string]time.Time
-	local     map[string]bool      // cards of the app itself: the state of the server says nothing about them
-	calls     map[string]time.Time // calls and when they leave at the latest
 	more      int
+	moreSeen  int // of more, hidden by «Скрыть все»
 	dnd       bool
+	dndFrom   int64 // in DND only cards that came before it are shown
 }
 
 // New creates an empty manager.
 func New() *Manager {
-	return &Manager{cards: map[string]api.Card{}, dismissed: map[string]time.Time{}, local: map[string]bool{}, until: map[string]time.Time{},
-		calls: map[string]time.Time{}, show: Show}
+	m := &Manager{}
+	m.reset()
+	return m
 }
 
-func remove(list []string, key string) ([]string, bool) {
-	for i, k := range list {
-		if k == key {
-			return append(list[:i:i], list[i+1:]...), true
+func (m *Manager) reset() {
+	m.cards, m.order, m.local = map[string]api.Card{}, map[string]int64{}, map[string]bool{}
+	m.calls, m.tests, m.dismissed = map[string]time.Time{}, map[string]time.Time{}, map[string]time.Time{}
+	m.visible, m.held, m.more, m.moreSeen, m.last = nil, "", 0, 0, 0
+	m.endBrowse()
+}
+
+func (m *Manager) isCall(k string) bool { _, ok := m.calls[k]; return ok }
+
+// counted: an unread message of the CRM, not a card of the app, a check or a call.
+func (m *Manager) counted(k string) bool {
+	return !m.local[k] && !m.isCall(k) && m.cards[k].Kind != KindTest
+}
+
+// muted: the card came during «Не беспокоить» and waits for its end.
+func (m *Manager) muted(k string) bool { return m.dnd && m.order[k] > m.dndFrom }
+
+// settle puts on the screen the calls and then the newest cards, Max at most. It runs after every change.
+func (m *Manager) settle() {
+	var all []string
+	for k := range m.cards {
+		if !m.muted(k) {
+			all = append(all, k)
 		}
 	}
-	return list, false
-}
-
-// fill moves waiting cards to free places (not in DND), the newest first; the newest shown ends at the bottom.
-func (m *Manager) fill() {
+	slices.SortFunc(all, func(a, b string) int {
+		if ca, cb := m.isCall(a), m.isCall(b); ca != cb {
+			if ca {
+				return -1
+			}
+			return 1
+		}
+		return int(m.order[b] - m.order[a])
+	})
+	m.visible = all[:min(Max, len(all))]
+	now := time.Now()
+	for _, k := range m.visible {
+		if at, test := m.tests[k]; test && at.IsZero() {
+			m.tests[k] = now.Add(TestFor) // a check counts its time from the moment it is seen
+		}
+	}
 	if m.browsing {
 		list := m.list(time.Time{})
 		if len(list) == 0 {
 			m.endBrowse()
 		} else {
 			m.offset = max(min(m.offset, len(list)-m.page()), 0)
-			return
 		}
-	}
-	if m.dnd {
-		return
-	}
-	m.ring()
-	n := min(Max-len(m.visible), len(m.waiting))
-	if n <= 0 {
-		return
-	}
-	chosen := m.waiting[:n]
-	for i := n - 1; i >= 0; i-- {
-		m.visible = append([]string{chosen[i]}, m.visible...)
-		if m.timed(chosen[i]) {
-			m.until[chosen[i]] = time.Now().Add(m.show)
-		}
-	}
-	m.waiting = append([]string(nil), m.waiting[n:]...)
-}
-
-// ring puts the waiting calls on the screen at once, at the edge: on a full screen the farthest card that is not a call
-// leaves it (it counts as shown).
-func (m *Manager) ring() {
-	for _, k := range append([]string(nil), m.waiting...) {
-		if _, call := m.calls[k]; !call {
-			continue
-		}
-		if len(m.visible) >= Max {
-			i := len(m.visible) - 1
-			for i >= 0 {
-				if _, call := m.calls[m.visible[i]]; !call {
-					break
-				}
-				i--
-			}
-			if i < 0 {
-				return // three calls at once: the next one waits for a place
-			}
-			far := m.visible[i]
-			m.visible, _ = remove(m.visible, far)
-			delete(m.until, far)
-			if m.local[far] {
-				m.waiting = append([]string{far}, m.waiting...) // a card of the app needs an action: it comes back
-			} else if m.cards[far].Kind != KindTest {
-				m.seen = append(m.seen, far)
-			} else {
-				m.drop(far)
-			}
-		}
-		m.waiting, _ = remove(m.waiting, k)
-		m.visible = append([]string{k}, m.visible...)
 	}
 }
 
-// timed: the card leaves the screen by itself (the cards of the app stay until an action, except the check).
-func (m *Manager) timed(k string) bool {
-	if _, call := m.calls[k]; call {
-		return false
-	}
-	return !m.local[k] || m.cards[k].Kind == KindTest
-}
-
-// put adds or replaces a card; a newer state shows it again. Waiting cards are kept newest first.
+// put adds or replaces a card; a newer state (a later time or more messages) brings it to the edge.
 func (m *Manager) put(c api.Card) {
 	old, had := m.cards[c.Key]
 	m.cards[c.Key] = c
-	if had {
-		if !c.At.After(old.At) && c.Count <= old.Count {
-			return
-		}
-		if _, on := m.until[c.Key]; on {
-			m.until[c.Key] = time.Now().Add(m.show)
-			return
-		}
-		var back bool
-		if m.seen, back = remove(m.seen, c.Key); !back {
-			return
+	if !had || c.At.After(old.At) || c.Count > old.Count {
+		m.last++
+		m.order[c.Key] = m.last
+	}
+	if c.Kind == KindTest {
+		if _, ok := m.tests[c.Key]; !ok {
+			m.tests[c.Key] = time.Time{}
 		}
 	}
-	i := 0
-	for i < len(m.waiting) && !m.cards[m.waiting[i]].At.Before(c.At) {
-		i++
-	}
-	m.waiting = append(m.waiting[:i], append([]string{c.Key}, m.waiting[i:]...)...)
 	for len(m.cards) > MaxKept {
-		switch {
-		case len(m.seen) > 0:
-			m.drop(m.seen[0])
-		case len(m.waiting) > 0:
-			m.drop(m.waiting[len(m.waiting)-1])
-		default:
+		oldest, at := "", int64(0)
+		for k, o := range m.order {
+			if m.counted(k) && (oldest == "" || o < at) {
+				oldest, at = k, o
+			}
+		}
+		if oldest == "" {
 			return
 		}
+		m.drop(oldest)
 	}
 }
 
@@ -206,7 +176,7 @@ func (m *Manager) Card(c api.Card) (sound string) {
 	delete(m.dismissed, c.Key) // a new message brings a dismissed card back
 	old, had := m.cards[c.Key]
 	if c.Kind == KindCall {
-		if _, ringing := m.calls[c.Key]; !ringing {
+		if !m.isCall(c.Key) {
 			m.calls[c.Key] = time.Now().Add(CallFor)
 		}
 		if m.browsing {
@@ -214,7 +184,7 @@ func (m *Manager) Card(c api.Card) (sound string) {
 		}
 	}
 	m.put(c)
-	m.fill()
+	m.settle()
 	if m.dnd || (had && c.Count <= old.Count) {
 		return ""
 	}
@@ -228,7 +198,7 @@ func (m *Manager) Local(c api.Card) {
 	delete(m.dismissed, c.Key)
 	m.local[c.Key] = true
 	m.put(c)
-	m.fill()
+	m.settle()
 }
 
 func soundOf(c api.Card) string {
@@ -238,31 +208,30 @@ func soundOf(c api.Card) string {
 	return api.SoundOther
 }
 
-// Clear drops cards (read elsewhere, the conversation left the queue).
+// Clear drops cards (read elsewhere, the conversation left the queue, the call ended).
 func (m *Manager) Clear(keys ...string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, k := range keys {
 		m.drop(k)
 	}
-	m.fill()
+	m.settle()
 }
 
 func (m *Manager) drop(k string) {
 	delete(m.cards, k)
+	delete(m.order, k)
 	delete(m.local, k)
 	delete(m.calls, k)
-	delete(m.until, k)
+	delete(m.tests, k)
 	if m.held == k {
 		m.held = ""
-		m.browseEnd = time.Now().Add(m.show) // the next card comes under the mouse
+		m.browseEnd = time.Now().Add(ListFor) // the next card comes under the mouse
 	}
-	m.visible, _ = remove(m.visible, k)
-	m.waiting, _ = remove(m.waiting, k)
-	m.seen, _ = remove(m.seen, k)
+	m.visible = slices.DeleteFunc(m.visible, func(v string) bool { return v == k })
 }
 
-// Tick takes the cards whose time has ended off the screen; the next ones take the free places.
+// Tick ends what ends by itself: a check, a call whose end was lost, the list the mouse has left.
 func (m *Manager) Tick(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -271,44 +240,32 @@ func (m *Manager) Tick(now time.Time) {
 			m.drop(k)
 		}
 	}
-	if m.browsing {
-		if m.held == "" && !now.Before(m.browseEnd) {
-			m.endBrowse()
-			m.fill()
-		}
-		return
-	}
-	for _, k := range append([]string(nil), m.visible...) {
-		at, timed := m.until[k]
-		if !timed || k == m.held || now.Before(at) {
-			continue
-		}
-		if m.cards[k].Kind == KindTest {
+	for k, end := range m.tests {
+		if !end.IsZero() && k != m.held && !now.Before(end) {
 			m.drop(k)
-			continue
 		}
-		delete(m.until, k)
-		m.visible, _ = remove(m.visible, k)
-		m.seen = append(m.seen, k)
 	}
-	m.fill()
+	if m.browsing && m.held == "" && !now.Before(m.browseEnd) {
+		m.endBrowse()
+	}
+	m.settle()
 }
 
-// Hold keeps a card on the screen while the mouse is over it; the card gets its full time after. It reports a change.
+// Hold keeps a check or the list while the mouse is over it; they get their full time after. It reports a change.
 func (m *Manager) Hold(key string, on bool) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if on {
-		if _, timed := m.until[key]; key == m.held || (!timed && !m.browsing) {
+		if _, test := m.tests[key]; key == m.held || (!test && !m.browsing) {
 			return false
 		}
 	} else if key != m.held {
 		return false
 	}
-	if _, timed := m.until[m.held]; timed {
-		m.until[m.held] = time.Now().Add(m.show)
+	if _, test := m.tests[m.held]; test {
+		m.tests[m.held] = time.Now().Add(TestFor)
 	}
-	m.browseEnd = time.Now().Add(m.show)
+	m.browseEnd = time.Now().Add(ListFor)
 	m.held = ""
 	if on {
 		m.held = key
@@ -327,7 +284,7 @@ func (m *Manager) Sync(s api.Snapshot) {
 		present[c.Key] = true
 	}
 	for k := range m.cards {
-		if _, call := m.calls[k]; !present[k] && !m.local[k] && !call {
+		if !present[k] && !m.local[k] && !m.isCall(k) {
 			m.drop(k)
 		}
 	}
@@ -336,77 +293,83 @@ func (m *Manager) Sync(s api.Snapshot) {
 			delete(m.dismissed, k) // read or gone: forget the dismissal
 		}
 	}
-	for _, c := range s.Cards {
+	cards := slices.Clone(s.Cards)
+	slices.SortStableFunc(cards, func(a, b api.Card) int { return a.At.Compare(b.At) }) // the newest gets the edge
+	for _, c := range cards {
 		if at, ok := m.dismissed[c.Key]; ok && !c.At.After(at) {
 			continue
 		}
 		delete(m.dismissed, c.Key)
 		m.put(c)
 	}
-	m.more = s.Total - len(s.Cards)
-	if m.more < 0 {
-		m.more = 0
-	}
-	m.fill()
+	m.more = max(s.Total-len(s.Cards), 0)
+	m.moreSeen = min(m.moreSeen, m.more) // read in the CRM: what is left of the hidden ones
+	m.settle()
 }
 
-// Dismiss removes a card here only (×, «Открыть», «Прочитано» before the server answers); it comes back with a newer
+// Dismiss removes a card here only («Закрыть»; «Прочитано» before the server answers); it comes back with a newer
 // message.
 func (m *Manager) Dismiss(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.dismiss(key)
+	m.settle()
+}
+
+func (m *Manager) dismiss(key string) {
 	if c, ok := m.cards[key]; ok {
 		m.dismissed[key] = c.At
 	}
 	m.drop(key)
-	m.fill()
 }
 
-// SetDND switches «Не беспокоить»: no new cards on the screen and no sounds; received cards wait and show after.
+// HideAll is «Скрыть все»: every unread card leaves this computer, the strip too; each comes back with a newer message.
+// Calls and the cards of the app stay: they are not messages.
+func (m *Manager) HideAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k := range m.cards {
+		if m.counted(k) {
+			m.dismiss(k)
+		}
+	}
+	m.moreSeen = m.more
+	m.endBrowse()
+	m.settle()
+}
+
+// SetDND switches «Не беспокоить»: the cards on the screen stay, new ones and sounds wait for its end.
 func (m *Manager) SetDND(on bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.dnd = on
-	m.fill()
-}
-
-// SetShow changes how long a card stays on the screen (nothing or less — the default).
-func (m *Manager) SetShow(d time.Duration) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if d <= 0 {
-		d = Show
+	if on && !m.dnd {
+		m.dndFrom = m.last
 	}
-	m.show = d
+	m.dnd = on
+	m.settle()
 }
 
 // page is how many cards of the list fit: a call that was ringing when the list opened keeps its place.
 func (m *Manager) page() int {
 	n := Max
 	for _, k := range m.visible {
-		if _, call := m.calls[k]; call {
+		if m.isCall(k) {
 			n--
 		}
 	}
 	return max(n, 0)
 }
 
-// counted: an unread message of the CRM, not a card of the app, a check or a call.
-func (m *Manager) counted(k string, c api.Card) bool {
-	_, call := m.calls[k]
-	return !m.local[k] && !call && c.Kind != KindTest
-}
-
 // list is what the strip counts, the newest first; with a time — only the cards not newer than it.
 func (m *Manager) list(before time.Time) []string {
 	var out []string
 	for k, c := range m.cards {
-		if m.counted(k, c) && (before.IsZero() || !c.At.After(before)) {
+		if m.counted(k) && (before.IsZero() || !c.At.After(before)) {
 			out = append(out, k)
 		}
 	}
 	slices.SortFunc(out, func(a, b string) int {
-		if c := m.cards[b].At.Compare(m.cards[a].At); c != 0 {
+		if c := int(m.order[b] - m.order[a]); c != 0 {
 			return c
 		}
 		return strings.Compare(a, b)
@@ -421,31 +384,23 @@ func (m *Manager) Unread(before time.Time) []string {
 	return m.list(before)
 }
 
-// Browse opens the list from the strip. The person is looking now: nothing waits for its turn, the timers stop.
+// Browse opens the list from the strip.
 func (m *Manager) Browse() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.list(time.Time{})) == 0 {
 		return
 	}
-	for _, k := range append(append([]string(nil), m.visible...), m.waiting...) {
-		if m.counted(k, m.cards[k]) {
-			m.visible, _ = remove(m.visible, k)
-			m.waiting, _ = remove(m.waiting, k)
-			delete(m.until, k)
-			m.seen = append(m.seen, k)
-		}
-	}
 	m.browsing, m.offset, m.held = true, 0, ""
-	m.browseEnd = time.Now().Add(m.show)
+	m.browseEnd = time.Now().Add(ListFor)
 }
 
-// EndBrowse closes the list.
+// EndBrowse closes the list: the screen shows the newest cards again.
 func (m *Manager) EndBrowse() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.endBrowse()
-	m.fill()
+	m.settle()
 }
 
 func (m *Manager) endBrowse() { m.browsing, m.offset, m.held = false, 0, "" }
@@ -456,8 +411,8 @@ func (m *Manager) Scroll(by int) {
 	defer m.mu.Unlock()
 	if m.browsing {
 		m.offset = max(m.offset+by, 0)
-		m.browseEnd = time.Now().Add(m.show)
-		m.fill()
+		m.browseEnd = time.Now().Add(ListFor)
+		m.settle()
 	}
 }
 
@@ -473,22 +428,20 @@ func (m *Manager) Get(key string) (api.Card, bool) {
 func (m *Manager) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.cards, m.visible, m.waiting, m.seen, m.dismissed, m.local, m.until, m.held, m.more = map[string]api.Card{}, nil, nil, nil,
-		map[string]time.Time{}, map[string]bool{}, map[string]time.Time{}, "", 0
-	m.calls = map[string]time.Time{}
-	m.endBrowse()
+	m.reset()
 }
 
 // View returns what to show.
 func (m *Manager) View() View {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v := View{Waiting: len(m.waiting), More: m.more, DND: m.dnd, Browsing: m.browsing, Offset: m.offset}
+	v := View{More: m.more - m.moreSeen, DND: m.dnd, Browsing: m.browsing, Offset: m.offset}
+	shown := 0
 	if m.browsing {
 		list := m.list(time.Time{})
 		v.Listed = len(list)
 		for _, k := range m.visible {
-			if _, call := m.calls[k]; call {
+			if m.isCall(k) {
 				v.Visible = append(v.Visible, m.cards[k])
 				v.Calls++
 			}
@@ -499,28 +452,41 @@ func (m *Manager) View() View {
 	} else {
 		for _, k := range m.visible {
 			v.Visible = append(v.Visible, m.cards[k])
-		}
-	}
-	for k, c := range m.cards {
-		if m.counted(k, c) {
-			v.Unread++
-		}
-	}
-	v.Unread += m.more
-	switch {
-	case m.browsing && m.held == "":
-		v.Next = m.browseEnd
-	case !m.browsing:
-		for k, at := range m.until {
-			if k != m.held && (v.Next.IsZero() || at.Before(v.Next)) {
-				v.Next = at
+			if m.isCall(k) {
+				v.Calls++
+			} else if m.counted(k) {
+				shown++
 			}
 		}
 	}
-	for _, end := range m.calls {
-		if v.Next.IsZero() || end.Before(v.Next) {
-			v.Next = end
+	for k := range m.cards {
+		if m.counted(k) {
+			v.Unread++
 		}
+		if m.muted(k) {
+			v.Waiting++
+		}
+	}
+	v.Unread += v.More
+	v.Hidden = v.Unread - shown
+	if m.browsing {
+		v.Hidden = v.Unread
+	}
+	next := func(at time.Time) {
+		if !at.IsZero() && (v.Next.IsZero() || at.Before(v.Next)) {
+			v.Next = at
+		}
+	}
+	for k, at := range m.tests {
+		if k != m.held {
+			next(at)
+		}
+	}
+	for _, at := range m.calls {
+		next(at)
+	}
+	if m.browsing && m.held == "" {
+		next(m.browseEnd)
 	}
 	return v
 }

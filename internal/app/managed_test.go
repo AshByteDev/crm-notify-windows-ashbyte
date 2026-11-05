@@ -220,15 +220,16 @@ func TestZeroMinutesChecksOnce(t *testing.T) {
 	}
 }
 
-func TestNotificationSecondsFromConfig(t *testing.T) {
+// The time of a notification is gone from config.json: a file that still has it works, cards stay until an action.
+func TestOldNotificationSecondsIgnored(t *testing.T) {
 	a, dir, _, _ := copyIn(t)
-	if err := managed.Save(dir, managed.Config{NotificationSeconds: 30}); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, managed.ConfigName), []byte(`{"notification_seconds": 5}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	a.tick(context.Background())
 	a.Q.Card(api.Card{Key: "a", Count: 1, At: time.Now()})
-	if d := time.Until(a.Q.View().Next); d < 20*time.Second {
-		t.Fatal(d)
+	if v := a.Q.View(); !v.Next.IsZero() || len(v.Visible) != 1 {
+		t.Fatalf("%+v", v)
 	}
 }
 
