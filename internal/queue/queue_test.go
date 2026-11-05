@@ -413,3 +413,97 @@ func TestUnreadBefore(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func call(key string) api.Card {
+	return api.Card{Key: key, Kind: KindCall, Title: "Звонит: " + key, At: t0, Sound: api.SoundClient}
+}
+
+// A call comes at once to the edge, the farthest card gives its place; it has no timer and is not unread.
+func TestCallComesFirst(t *testing.T) {
+	m := New()
+	for i := 1; i <= 3; i++ {
+		m.Card(card(fmt.Sprint("c", i), 1, i))
+	}
+	if snd := m.Card(call("ring-1")); snd != api.SoundClient {
+		t.Fatalf("sound %q", snd)
+	}
+	v := m.View()
+	if keys(v) != "ring-1 c3 c2 " || v.Unread != 3 || v.Waiting != 0 {
+		t.Fatalf("%q unread %d waiting %d", keys(v), v.Unread, v.Waiting)
+	}
+	m.Tick(time.Now().Add(time.Minute)) // the messages leave, the call stays
+	if v := m.View(); keys(v) != "ring-1 " {
+		t.Fatalf("after their time: %q", keys(v))
+	}
+	m.Card(call("ring-1")) // the same call again: no second sound
+	if snd := m.Card(call("ring-1")); snd != "" {
+		t.Fatalf("again: %q", snd)
+	}
+}
+
+// The snapshot has no calls: a snapshot or notify.sync leaves them, notify.clear ends them.
+func TestCallStaysUntilClear(t *testing.T) {
+	m := New()
+	m.Card(call("ring-1"))
+	m.Sync(api.Snapshot{Cards: []api.Card{card("c1", 1, 1)}, Total: 1})
+	if _, ok := m.Get("ring-1"); !ok {
+		t.Fatal("dropped by the sync")
+	}
+	m.Clear("ring-1")
+	if v := m.View(); keys(v) != "c1 " {
+		t.Fatalf("%q", keys(v))
+	}
+}
+
+// A lost clear does not keep a call forever.
+func TestCallEndsByItself(t *testing.T) {
+	m := New()
+	m.Card(call("ring-1"))
+	if v := m.View(); v.Next.IsZero() || time.Until(v.Next) > CallFor {
+		t.Fatalf("next %v", v.Next)
+	}
+	m.Tick(time.Now().Add(CallFor + time.Second))
+	if _, ok := m.Get("ring-1"); ok {
+		t.Fatal("still ringing")
+	}
+}
+
+// A call closes the list from the strip; a call on the screen keeps its place when the list opens.
+func TestCallAndList(t *testing.T) {
+	m := New()
+	for i := 1; i <= 5; i++ {
+		m.Card(card(fmt.Sprint("c", i), 1, i))
+	}
+	m.Browse()
+	m.Card(call("ring-1"))
+	v := m.View()
+	if v.Browsing || keys(v)[:7] != "ring-1 " {
+		t.Fatalf("browsing %v %q", v.Browsing, keys(v))
+	}
+	m.Browse()
+	v = m.View()
+	if !v.Browsing || keys(v) != "ring-1 c5 c4 " || v.Calls != 1 {
+		t.Fatalf("list %q calls %d", keys(v), v.Calls)
+	}
+	m.Scroll(10)
+	if v := m.View(); keys(v) != "ring-1 c2 c1 " {
+		t.Fatalf("the end of the list %q", keys(v))
+	}
+}
+
+// A call does not push a card of the app away for good.
+func TestCallKeepsLocalCard(t *testing.T) {
+	m := New()
+	m.Local(api.Card{Key: "update", Title: "Доступна версия"})
+	m.Card(card("c1", 1, 1))
+	m.Card(card("c2", 1, 2))
+	m.Card(call("ring-1"))
+	if v := m.View(); keys(v) != "ring-1 c2 c1 " {
+		t.Fatalf("%q", keys(v))
+	}
+	m.Clear("ring-1")
+	m.Tick(time.Now().Add(time.Minute))
+	if v := m.View(); keys(v) != "update " {
+		t.Fatalf("after the call: %q", keys(v))
+	}
+}

@@ -6,7 +6,7 @@ import "time"
 // Card is one notification card: one per chat, task, meeting, queued conversation (key).
 type Card struct {
 	Key     string    `json:"key"`
-	Kind    string    `json:"kind"` // dm groups mine queue mentions tasks calendar alerts
+	Kind    string    `json:"kind"` // dm groups mine queue mentions tasks calendar alerts test call
 	Title   string    `json:"title"`
 	Body    string    `json:"body"`
 	URL     string    `json:"url"` // a path in the CRM ("/team/<chat>")
