@@ -439,3 +439,63 @@ func TestCallAndList(t *testing.T) {
 		t.Fatalf("the end of the list %q", keys(v))
 	}
 }
+
+func talk(key string, min int) api.Card {
+	c := call(key)
+	c.At, c.Title, c.Call = t0.Add(time.Duration(min)*time.Minute), "Разговор: Пётр", &api.CallState{State: api.CallTalking}
+	c.Actions = []api.Action{{ID: "client", Title: "Карточка клиента", URL: "/contacts/1"}}
+	return c
+}
+
+// Contract 1.4: «Звонит» turns into «Разговор» without a sound; it has no limit of time, a snapshot keeps it while it
+// lists it and drops it when it does not; notify.clear ends it.
+func TestTalkingStaysUntilTheEnd(t *testing.T) {
+	m := New()
+	m.Card(call("ring-1"))
+	if snd := m.Card(talk("ring-1", 1)); snd != "" {
+		t.Fatalf("the answer makes a sound %q", snd)
+	}
+	if c, _ := m.Get("ring-1"); !c.Talking() || len(c.Actions) != 1 {
+		t.Fatalf("%+v", c)
+	}
+	m.Tick(time.Now().Add(time.Hour))
+	if _, ok := m.Get("ring-1"); !ok {
+		t.Fatal("a long talk is cut by the limit of a ringing call")
+	}
+	if v := m.View(); !v.Next.IsZero() || v.Calls != 1 || v.Unread != 0 {
+		t.Fatalf("%+v", v)
+	}
+	m.Sync(api.Snapshot{Cards: []api.Card{talk("ring-1", 1), card("c1", 1, 1)}, Total: 2})
+	if keys(m.View()) != "ring-1 c1 " {
+		t.Fatalf("%q", keys(m.View()))
+	}
+	m.Sync(api.Snapshot{Cards: []api.Card{card("c1", 1, 1)}, Total: 1})
+	if _, ok := m.Get("ring-1"); ok {
+		t.Fatal("the call ended while the app was away: the snapshot does not list it")
+	}
+	// a talk the app learns from the snapshot only (it reconnected during it)
+	m.Sync(api.Snapshot{Cards: []api.Card{talk("ring-2", 2)}, Total: 1})
+	if v := m.View(); v.Calls != 1 || !v.Next.IsZero() {
+		t.Fatalf("%+v", v)
+	}
+	m.Clear("ring-2")
+	if _, ok := m.Get("ring-2"); ok {
+		t.Fatal("notify.clear")
+	}
+}
+
+// «Пропустить» removes the call here only: a repeat of the same state does not bring it back, a new state does.
+func TestSkipCall(t *testing.T) {
+	m := New()
+	m.Card(talk("ring-1", 1))
+	m.Dismiss("ring-1")
+	m.Card(talk("ring-1", 1))
+	m.Sync(api.Snapshot{Cards: []api.Card{talk("ring-1", 1)}, Total: 1})
+	if _, ok := m.Get("ring-1"); ok {
+		t.Fatal("skipped call came back")
+	}
+	m.Card(talk("ring-1", 5)) // a transfer to this employee again
+	if _, ok := m.Get("ring-1"); !ok {
+		t.Fatal("a new state of the call")
+	}
+}

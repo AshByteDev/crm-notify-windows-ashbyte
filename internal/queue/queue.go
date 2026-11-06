@@ -28,12 +28,14 @@ const StripKey = "strip"
 // an unread message: it is not counted and leaves for good after TestFor.
 const KindTest = "test"
 
-// KindCall is a client calling right now (contract 1.3, key ring-…): it comes before the other cards and stays until the
-// CRM clears it (an answer or the end of the call). It is not in the snapshot, so a snapshot or notify.sync does not drop
-// it; it is not an unread message either.
+// KindCall is a call of a client (contract 1.4, key ring-…): it comes before the other cards and is not an unread
+// message. «Звонит» (ringing) stays until the CRM clears it (an answer or the end of the call); it is not in the
+// snapshot, so a snapshot or notify.sync does not drop it. «Разговор» (talking, the employee answered) stays until the
+// end of the call: it is in the snapshot, so a snapshot without it drops it.
 const KindCall = "call"
 
-// CallFor is how long a call stays at most: the clear of the CRM may be lost with a broken connection.
+// CallFor is how long «Звонит» stays at most: the clear of the CRM may be lost with a broken connection. «Разговор» has
+// no limit: the snapshot after reconnecting tells whether it goes on.
 const CallFor = 3 * time.Minute
 
 // MaxKept bounds the memory: beyond it the oldest cards are dropped (they stay unread in the CRM).
@@ -70,7 +72,7 @@ type Manager struct {
 	last      int64                // the last order given
 	visible   []string             // the edge of the screen first
 	local     map[string]bool      // cards of the app itself: the state of the server says nothing about them
-	calls     map[string]time.Time // calls and when they leave at the latest
+	calls     map[string]time.Time // calls and when they leave at the latest (zero — «Разговор», no limit)
 	tests     map[string]time.Time // checks and when they leave (zero — not shown yet)
 	dismissed map[string]time.Time // removed here: they come back only with a newer state
 	held      string               // the card under the mouse
@@ -98,6 +100,19 @@ func (m *Manager) reset() {
 }
 
 func (m *Manager) isCall(k string) bool { _, ok := m.calls[k]; return ok }
+
+// talking: «Разговор» — it goes with the end of the call, a snapshot without it ends it.
+func (m *Manager) talking(k string) bool { end, ok := m.calls[k]; return ok && end.IsZero() }
+
+// markCall keeps the limit of a call: «Звонит» gets CallFor once, «Разговор» none.
+func (m *Manager) markCall(c api.Card) {
+	switch {
+	case c.Talking():
+		m.calls[c.Key] = time.Time{}
+	case !m.isCall(c.Key) || m.talking(c.Key):
+		m.calls[c.Key] = time.Now().Add(CallFor)
+	}
+}
 
 // counted: an unread message of the CRM, not a card of the app, a check or a call.
 func (m *Manager) counted(k string) bool {
@@ -173,12 +188,13 @@ func (m *Manager) put(c api.Card) {
 func (m *Manager) Card(c api.Card) (sound string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if at, gone := m.dismissed[c.Key]; gone && c.Kind == KindCall && !c.At.After(at) {
+		return "" // «Пропустить»: a repeat of the same call does not come back
+	}
 	delete(m.dismissed, c.Key) // a new message brings a dismissed card back
 	old, had := m.cards[c.Key]
 	if c.Kind == KindCall {
-		if !m.isCall(c.Key) {
-			m.calls[c.Key] = time.Now().Add(CallFor)
-		}
+		m.markCall(c)
 		if m.browsing {
 			m.endBrowse() // the call must be seen: the list closes
 		}
@@ -236,7 +252,7 @@ func (m *Manager) Tick(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k, end := range m.calls {
-		if !now.Before(end) {
+		if !end.IsZero() && !now.Before(end) {
 			m.drop(k)
 		}
 	}
@@ -284,7 +300,7 @@ func (m *Manager) Sync(s api.Snapshot) {
 		present[c.Key] = true
 	}
 	for k := range m.cards {
-		if !present[k] && !m.local[k] && !m.isCall(k) {
+		if !present[k] && !m.local[k] && (!m.isCall(k) || m.talking(k)) {
 			m.drop(k)
 		}
 	}
@@ -300,6 +316,9 @@ func (m *Manager) Sync(s api.Snapshot) {
 			continue
 		}
 		delete(m.dismissed, c.Key)
+		if c.Kind == KindCall {
+			m.markCall(c)
+		}
 		m.put(c)
 	}
 	m.more = max(s.Total-len(s.Cards), 0)
@@ -483,7 +502,9 @@ func (m *Manager) View() View {
 		}
 	}
 	for _, at := range m.calls {
-		next(at)
+		if !at.IsZero() {
+			next(at)
+		}
 	}
 	if m.browsing && m.held == "" {
 		next(m.browseEnd)
