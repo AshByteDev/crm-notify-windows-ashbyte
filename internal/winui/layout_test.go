@@ -1,6 +1,8 @@
 package winui
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +94,36 @@ func TestStripText(t *testing.T) {
 	} {
 		if got := stripText(c.q); got != c.want {
 			t.Errorf("%+v: %q", c.q, got)
+		}
+	}
+}
+
+func TestTalkButtons(t *testing.T) {
+	acts := func(ids ...string) api.Card {
+		c := api.Card{}
+		for _, id := range ids {
+			a := api.Action{ID: id, Title: id, URL: "/" + id}
+			if strings.HasSuffix(id, "*") {
+				a.ID, a.Primary = strings.TrimSuffix(id, "*"), true
+			}
+			c.Actions = append(c.Actions, a)
+		}
+		return c
+	}
+	for _, tc := range []struct {
+		card          api.Card
+		first, second int
+		menu          string
+	}{
+		{acts("client", "message*", "message", "check"), 0, 1, "[2 3]"},
+		{acts("client", "message", "message*", "check"), 0, 2, "[1 3]"},
+		{acts("client", "check"), 0, 1, "[]"},
+		{acts("message*", "check"), 1, 0, "[]"},
+		{acts(), -1, -1, "[]"},
+	} {
+		f, s, m := talkButtons(tc.card)
+		if f != tc.first || s != tc.second || fmt.Sprint(append([]int{}, m...)) != tc.menu {
+			t.Errorf("%v: %d %d %v", tc.card.Actions, f, s, m)
 		}
 	}
 }

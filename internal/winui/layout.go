@@ -138,3 +138,35 @@ func zoneName(position string) string {
 	}
 	return ""
 }
+
+// talkButtons splits the buttons of «Разговор» (contract 1.4 §5.3): first — «Карточка клиента», second — the main
+// «Написать в …» (or the next button when there is no messenger), menu — the rest, in their order, behind «▾».
+// -1 — no such button.
+func talkButtons(c api.Card) (first, second int, menu []int) {
+	first, second = -1, -1
+	for i, a := range c.Actions {
+		if a.ID == "client" && first < 0 {
+			first = i
+		}
+	}
+	for i, a := range c.Actions { // the primary message, else the first message
+		if a.ID == "message" && i != first && (second < 0 || a.Primary && !c.Actions[second].Primary) {
+			second = i
+		}
+	}
+	for i := range c.Actions {
+		if i == first || i == second {
+			continue
+		}
+		if first < 0 {
+			first = i
+			continue
+		}
+		if second < 0 {
+			second = i
+			continue
+		}
+		menu = append(menu, i)
+	}
+	return first, second, menu
+}

@@ -11,7 +11,7 @@
 * [`docs/APP_SPEC.md`](docs/APP_SPEC.md) — ТЗ приложения и принятые решения.
 * [`README.md`](README.md) — как устроено, сборка, выпуск, установка для организации.
 * [`docs/CRM_TERMINAL_SERVER.md`](docs/CRM_TERMINAL_SERVER.md) — ТЗ для CRM: работа на терминальном сервере.
-* [`docs/CRM_CALLS.md`](docs/CRM_CALLS.md) — ТЗ для CRM: карточка разговора с клиентом (контракт 1.4).
+* [`docs/CRM_CALLS.md`](docs/CRM_CALLS.md) — ТЗ для CRM: карточка разговора с клиентом (контракт 1.4, выполнено в CRM 0.0.66).
 Документация и общение — на русском.
 
 ## Новая версия контракта

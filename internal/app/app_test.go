@@ -12,7 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/managed"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/queue"
 )
 
 func TestNewer(t *testing.T) {
@@ -167,5 +169,23 @@ func TestPlainHTTPOnlyInsideTheNetwork(t *testing.T) {
 		if _, err := NormalizeServer(bad); err == nil {
 			t.Errorf("%s accepted over plain http", bad)
 		}
+	}
+}
+
+// Contract 1.4: a button of «Разговор» opens its path in the CRM only (with its query); the card stays.
+func TestOpenAction(t *testing.T) {
+	var opened []string
+	a := &App{Server: "https://crm.example.ru", Q: queue.New(), P: Platform{OpenURL: func(u string) error { opened = append(opened, u); return nil }}}
+	a.Q.Card(api.Card{Key: "ring-1", Kind: queue.KindCall, Call: &api.CallState{State: api.CallTalking}, Actions: []api.Action{
+		{ID: "message", Title: "Написать в Telegram", URL: "/c/1?via=2", Primary: true}, {ID: "check", Title: "x", URL: "https://evil.example"}}})
+	a.OpenAction("ring-1", 0)
+	a.OpenAction("ring-1", 1)
+	a.OpenAction("ring-1", 7)
+	a.OpenAction("ring-9", 0)
+	if strings.Join(opened, " ") != "https://crm.example.ru/c/1?via=2 https://crm.example.ru/team" {
+		t.Fatalf("%v", opened)
+	}
+	if _, ok := a.Q.Get("ring-1"); !ok {
+		t.Fatal("a button removed the card")
 	}
 }

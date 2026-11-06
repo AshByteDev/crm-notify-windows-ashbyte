@@ -25,6 +25,7 @@ const (
 	cardW    = 360
 	cardH    = 76  // the line of the sender and two lines of the message
 	serviceH = 116 // the cards with worded buttons
+	talkH    = 108 // «Разговор»: the title, the number, a row of worded buttons (contract 1.4)
 	moreH    = 32
 	dot      = 20 // the coloured circles of a card (TZ: at least 16)
 	dotGap   = 8  // between them (TZ: at least 6)
@@ -70,7 +71,13 @@ const (
 	hitLogin
 	hitHideAll // the words of the strip
 	hitReadAll
+	hitAct1    // the buttons of «Разговор»: «Карточка клиента», «Написать в …», «▾»
+	hitAct2
+	hitActMenu
 )
+
+// cmdAction + i in the menu «▾» of «Разговор» is the action i of the card.
+const cmdAction = 1000
 
 // slot is one window of the stack: a card, the «sign in» card or the strip of the unread.
 type slot struct {
@@ -544,6 +551,8 @@ func (u *UI) refresh() {
 			heights[i] = u.pi(moreH)
 		case w.kind == "signin" || w.card.Key == app.UpdateKey:
 			heights[i] = u.pi(serviceH)
+		case w.card.Talking():
+			heights[i] = u.pi(talkH)
 		default:
 			heights[i] = u.pi(cardH)
 		}
@@ -558,7 +567,7 @@ func (u *UI) refresh() {
 			continue
 		}
 		w, h, at := list[i], heights[i], places[i]
-		changed := rescaled || s.kind != w.kind || s.text != w.text || s.card != w.card
+		changed := rescaled || s.kind != w.kind || s.text != w.text || !api.Same(s.card, w.card)
 		s.kind, s.text, s.card = w.kind, w.text, w.card
 		pSetWindowPos.Call(s.hwnd, hwndTopmost, uintptr(at.X), uintptr(at.Y), uintptr(u.pi(cardW)), uintptr(h), swpNoActivate|swpShowWindow)
 		rgn, _, _ := pCreateRoundRectRgn.Call(0, 0, uintptr(u.pi(cardW)+1), uintptr(h+1), uintptr(u.pi(radius)), uintptr(u.pi(radius)))
@@ -614,6 +623,26 @@ func (u *UI) buttons(s *slot) (open, read, close rect) {
 	return
 }
 
+// talkRects are the worded buttons of «Разговор» in the last row: the first, the second, «▾» (an empty rect — none).
+func (u *UI) talkRects(s *slot) (b1, b2, bm rect) {
+	first, second, menu := talkButtons(s.card)
+	w, h := u.pi(cardW), u.pi(talkH)
+	top, bottom := h-u.pi(12)-u.pi(28), h-u.pi(12)
+	left, right := u.pi(14), w-u.pi(12)
+	if len(menu) > 0 {
+		bm = rect{right - u.pi(28), top, right, bottom}
+		right = bm.Left - u.pi(6)
+	}
+	switch {
+	case first >= 0 && second >= 0:
+		b1 = rect{left, top, left + u.pi(124), bottom}
+		b2 = rect{b1.Right + u.pi(6), top, right, bottom}
+	case first >= 0:
+		b1 = rect{left, top, right, bottom}
+	}
+	return
+}
+
 func (u *UI) hit(s *slot, x, y int32) int {
 	if s.kind == "more" {
 		hide, read := u.stripButtons(s)
@@ -626,6 +655,17 @@ func (u *UI) hit(s *slot, x, y int32) int {
 		return hitBody
 	}
 	open, read, cl := u.buttons(s)
+	if s.kind == "card" && s.card.Talking() {
+		b1, b2, bm := u.talkRects(s)
+		switch {
+		case in(b1, x, y):
+			return hitAct1
+		case in(b2, x, y):
+			return hitAct2
+		case in(bm, x, y):
+			return hitActMenu
+		}
+	}
 	switch {
 	case in(cl, x, y):
 		return hitClose
@@ -677,6 +717,27 @@ func (u *UI) readAll() {
 }
 
 // stripMenu is the right click on the strip.
+// actionMenu is «▾» of «Разговор»: the other messengers and the rest of the buttons.
+func (u *UI) actionMenu(s *slot) {
+	_, _, menu := talkButtons(s.card)
+	if len(menu) == 0 {
+		return
+	}
+	h, _, _ := pCreatePopupMenu.Call()
+	defer pDestroyMenu.Call(h)
+	for _, i := range menu {
+		pAppendMenuW.Call(h, mfString, uintptr(cmdAction+i), uintptr(unsafe.Pointer(utf16(s.card.Actions[i].Title))))
+	}
+	var p point
+	pGetCursorPos.Call(ptr(&p))
+	pSetForegroundWindow.Call(u.tray) // else the menu does not close on a click outside
+	cmd, _, _ := pTrackPopupMenu.Call(h, tpmRightButton|tpmReturnCmd, uintptr(p.X), uintptr(p.Y), 0, u.tray, 0)
+	pPostMessageW.Call(u.tray, wmNull, 0, 0)
+	if i := int(cmd) - cmdAction; cmd != 0 && i >= 0 {
+		u.A.OpenAction(s.card.Key, i)
+	}
+}
+
 func (u *UI) stripMenu() {
 	n := u.A.View().Queue.Unread
 	h, _, _ := pCreatePopupMenu.Call()
@@ -769,6 +830,14 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 			} else if s.kind == "card" {
 				u.A.Open(s.card.Key) // a card with no path has nowhere to go: Open does nothing
 			}
+		case hitAct1:
+			first, _, _ := talkButtons(s.card)
+			u.A.OpenAction(s.card.Key, first) // the card stays: the call goes on
+		case hitAct2:
+			_, second, _ := talkButtons(s.card)
+			u.A.OpenAction(s.card.Key, second)
+		case hitActMenu:
+			u.actionMenu(s)
 		case hitHideAll:
 			u.A.HideAll()
 		case hitReadAll:
@@ -952,14 +1021,54 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 		}
 	}
 	p.text(cardTitle(s.card), rect{left, 0, first - u.pi(6), u.pi(36)}, u.font(13, true), colTitle, dtSingleLine|dtVCenter|dtEndEllipsis)
-	p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(70)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
+	if s.card.Talking() { // «Разговор»: the number on one line, the buttons in words below
+		p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(56)}, u.font(13, false), colBody, dtSingleLine|dtVCenter|dtEndEllipsis)
+		u.drawTalkButtons(p, s)
+	} else {
+		p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(70)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
+	}
 	u.circle(p, s, read, "✓", hitRead, colGreen, colGreenHov)
 	u.circle(p, s, open, "↗", hitOpen, colBlue, colBlueHov)
 	u.circle(p, s, cl, "✕", hitClose, colRed, colRedHov)
-	if hint := hintOf(s.hover); hint != "" { // the words of the circle under the mouse, over the end of the title
+	hint := hintOf(s.hover)
+	if call && s.hover == hitClose {
+		hint = "Пропустить" // only here: the call goes on
+	}
+	if hint != "" { // the words of the circle under the mouse, over the end of the title
 		at := rect{first - u.pi(118), u.pi(8), first - u.pi(6), u.pi(8 + dot)}
 		p.round(at, colHint, colHint, u.pi(8))
 		p.text(hint, at, u.font(12, false), colWhite, dtSingleLine|dtVCenter|dtCenter)
+	}
+}
+
+// drawTalkButtons: «Карточка клиента» in grey, the main «Написать в …» in blue, «▾» with the rest.
+func (u *UI) drawTalkButtons(p painter, s *slot) {
+	first, second, _ := talkButtons(s.card)
+	b1, b2, bm := u.talkRects(s)
+	button := func(r rect, i, hit int) {
+		if r.Right == 0 || i < 0 {
+			return
+		}
+		a := s.card.Actions[i]
+		bg, hov, fg, bold := colBtn, colBtnHov, colTitle, false
+		if a.ID == "message" {
+			bg, hov, fg, bold = colBlue, colBlueHov, colWhite, true
+		}
+		if s.hover == hit {
+			bg = hov
+		}
+		p.round(r, bg, bg, u.pi(8))
+		p.text(a.Title, rect{r.Left + u.pi(8), r.Top, r.Right - u.pi(8), r.Bottom}, u.font(12, bold), fg, dtSingleLine|dtVCenter|dtCenter|dtEndEllipsis)
+	}
+	button(b1, first, hitAct1)
+	button(b2, second, hitAct2)
+	if bm.Right > 0 {
+		bg := colBtn
+		if s.hover == hitActMenu {
+			bg = colBtnHov
+		}
+		p.round(bm, bg, bg, u.pi(8))
+		p.text("▾", bm, u.symbolFont(11), colTitle, dtSingleLine|dtVCenter|dtCenter)
 	}
 }
 
