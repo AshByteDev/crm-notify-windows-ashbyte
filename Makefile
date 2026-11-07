@@ -5,7 +5,7 @@ SERVER     ?=
 
 LDFLAGS    := -s -w -H windowsgui -X main.version=$(VERSION) -X main.server=$(SERVER)
 
-.PHONY: build test vet run stand-test version
+.PHONY: build test vet run stand-test version icon
 
 version:
 	@echo $(VERSION)
@@ -13,6 +13,12 @@ version:
 build: ## dist/AshCRM-Notify.exe (Windows 10/11, x64)
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/AshCRM-Notify.exe ./cmd/crm-notify-windows
 	@ls -l dist/AshCRM-Notify.exe
+
+icon: ## the icon and the manifest of the .exe from the sign of AshCRM (internal/winui/logo.go); commit the .syso
+	@mkdir -p dist
+	LOGO_OUT=$(CURDIR)/dist/logo-256.png go test -count=1 -run TestWriteLogo ./internal/winui/
+	cd cmd/crm-notify-windows && go run github.com/tc-hib/go-winres@v0.3.3 simply --arch amd64 --out rsrc \
+		--icon ../../dist/logo-256.png --manifest gui --product-name "AshCRM Notify" --file-description "AshCRM Notify"
 
 test: ## unit tests (the logic is OS-independent)
 	go test -race ./...

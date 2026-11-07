@@ -134,6 +134,13 @@ const (
 	wsExClientEdge   = 0x00000200
 	esAutoHScroll    = 0x0080
 	bsDefPushButton  = 0x0001
+	bsOwnerDraw      = 0x000B
+	wmDrawItem       = 0x002B
+	dmGetDefID       = 0x0400 // WM_USER
+	dcHasDefID       = 0x534B
+	odsSelected      = 0x0001
+	odsDisabled      = 0x0004
+	wsClipChildren   = 0x02000000
 	swShow           = 5
 	smCxScreen       = 0
 	smCyScreen       = 1
@@ -211,6 +218,14 @@ type wndClassEx struct {
 	MenuName   *uint16
 	ClassName  *uint16
 	IconSm     uintptr
+}
+
+// drawItem is DRAWITEMSTRUCT: what WM_DRAWITEM asks to paint.
+type drawItem struct {
+	CtlType, CtlID, ItemID, ItemAction, State uint32
+	Item, DC                                  uintptr
+	Rect                                      rect
+	Data                                      uintptr
 }
 
 // bitmapInfo is BITMAPINFOHEADER: a 32-bit top-down DIB (negative height), no palette.
