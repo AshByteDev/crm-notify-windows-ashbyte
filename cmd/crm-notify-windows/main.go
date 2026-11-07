@@ -49,6 +49,10 @@ func newApp() (*app.App, error) {
 	launcher := *from
 	if launcher == "" {
 		launcher = exe
+		beside := filepath.Join(filepath.Dir(exe), managed.ExeName)
+		if _, err := os.Stat(beside); err == nil && (managed.IsVersion(exe) || managed.IsRun(exe)) {
+			launcher = beside // a copy started by hand: autostart still goes to the constant name
+		}
 	}
 	log := logger(dir)
 	var settings *managed.Config // config.json next to the running copy

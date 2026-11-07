@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/rand/v2"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
@@ -130,14 +131,24 @@ func (a *App) changePortal(ctx context.Context, server string) {
 	a.changed()
 }
 
-// moveToTarget restarts from the version the app should run; true — this copy is closing.
+// moveToTarget restarts from the file the app should run from: another version, or the same one moved into
+// AshCRM-Notify-app.exe (managed.Prepare); true — this copy is closing.
 func (a *App) moveToTarget() bool {
 	t, ok := managed.Target(a.here(), a.pin(), a.Version)
-	if !ok || t.Version == a.Version {
+	if !ok {
 		return false
 	}
-	return a.restart(t.Path)
+	path := a.prepare(t)
+	if t.Version == a.Version && (samePath(path, a.Exe) || path == t.Path) {
+		return false
+	}
+	return a.restart(path)
 }
+
+// prepare is the file to start for a version; a copy that may not write next to itself only uses what the task left.
+func (a *App) prepare(t managed.Found) string { return managed.Prepare(a.here(), t, !a.Shared) }
+
+func samePath(a, b string) bool { return strings.EqualFold(filepath.Clean(a), filepath.Clean(b)) }
 
 // restart starts another file of the app and closes this copy.
 func (a *App) restart(path string) bool {

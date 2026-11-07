@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
@@ -52,19 +53,29 @@ func main() {
 	}
 }
 
-// launched: this is the file with the constant name and a version lies next to it: the version takes over and this
-// process ends, so the file is never held. Without such a file the app runs from here.
+// launched hands the start over to the file the app should run from, so the file with the constant name is never held:
+// the launcher starts the newest version, and the file of a version moves into AshCRM-Notify-app.exe (managed.RunName),
+// whose path Windows remembers for the icon. The copy already in the right file runs from here.
 func launched() bool {
 	exe, err := os.Executable()
-	if err != nil || version == "dev" || managed.IsVersion(exe) {
+	if err != nil || version == "dev" || managed.IsRun(exe) {
 		return false
 	}
-	c, _, _ := managed.Load(filepath.Dir(exe))
-	t, ok := managed.Target(filepath.Dir(exe), c.Version, version)
+	dir := filepath.Dir(exe)
+	c, _, _ := managed.Load(dir)
+	t, ok := managed.Target(dir, c.Version, version)
 	if !ok {
 		return false
 	}
-	return platform.Start(t.Path, append(os.Args[1:], "--from", exe)...) == nil
+	path := managed.Prepare(dir, t, true) // in Program Files a person cannot write: the version file runs then
+	if strings.EqualFold(filepath.Clean(path), filepath.Clean(exe)) {
+		return false
+	}
+	args := os.Args[1:]
+	if !managed.IsVersion(exe) { // a version got --from from the launcher already
+		args = append(args, "--from", exe)
+	}
+	return platform.Start(path, args...) == nil
 }
 
 // settle finishes the first start of a user of a shared folder, where nobody installs anything: autostart and the
