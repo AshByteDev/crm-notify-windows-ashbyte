@@ -130,7 +130,7 @@ func TestUpdateFromRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := filepath.Join(dir, managed.FileName("9.9.9"))
-	if started != want || !quit {
+	if started != filepath.Join(dir, managed.RunName) || !quit { // the same path for the icon (managed.RunSince)
 		t.Fatalf("started %q quit %v", started, quit)
 	}
 	if b, _ := os.ReadFile(want); string(b) != string(exe) {

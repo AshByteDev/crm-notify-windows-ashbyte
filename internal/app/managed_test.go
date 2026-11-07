@@ -386,3 +386,68 @@ func TestDeviceNameHasUser(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// From managed.RunSince the version runs from AshCRM-Notify-app.exe, whose path Windows keeps for the icon.
+func TestMovesIntoRunFile(t *testing.T) {
+	a, dir, started, quit := copyIn(t)
+	a.Version = managed.RunSince
+	a.Exe = place(t, dir, managed.RunSince)
+	run := filepath.Join(dir, managed.RunName)
+	a.tick(context.Background())
+	if want := run + " --updated --from " + a.Launcher; len(*started) != 1 || (*started)[0] != want || !*quit {
+		t.Fatal(*started, *quit)
+	}
+	// the copy in the run file stays
+	*started, *quit = nil, false
+	a.Exe = run
+	a.tick(context.Background())
+	if len(*started) != 0 || *quit {
+		t.Fatal(*started, *quit)
+	}
+	// a new version takes the same file
+	place(t, dir, "0.0.17")
+	a.tick(context.Background())
+	if len(*started) != 1 || !strings.HasPrefix((*started)[0], run+" ") {
+		t.Fatal(*started)
+	}
+	if b, _ := os.ReadFile(run); string(b) != "exe 0.0.17" {
+		t.Fatal(string(b))
+	}
+}
+
+// On a terminal server a person cannot write: the version file runs until the task puts it into the run file.
+func TestSharedWaitsForRunFile(t *testing.T) {
+	a, dir, started, _ := copyIn(t)
+	a.Shared = true
+	a.Version = managed.RunSince
+	a.Exe = place(t, dir, managed.RunSince)
+	a.tick(context.Background())
+	if len(*started) != 0 || fileThere(filepath.Join(dir, managed.RunName)) {
+		t.Fatal(*started)
+	}
+	if managed.Prepare(dir, managed.Found{Version: managed.RunSince, Path: a.Exe}, true) == a.Exe { // the task
+		t.Fatal("not prepared")
+	}
+	a.tick(context.Background())
+	if len(*started) != 1 || !strings.HasPrefix((*started)[0], filepath.Join(dir, managed.RunName)+" ") {
+		t.Fatal(*started)
+	}
+}
+
+// A pin back before managed.RunSince runs the old file as before: the way back.
+func TestPinBeforeRunFile(t *testing.T) {
+	a, dir, started, _ := copyIn(t)
+	a.Version = "0.0.17"
+	place(t, dir, "0.0.17")
+	old := place(t, dir, "0.0.15")
+	a.Exe = filepath.Join(dir, managed.RunName)
+	if err := managed.Save(dir, managed.Config{Version: "0.0.15", UpdateCheckMinutes: 60}); err != nil {
+		t.Fatal(err)
+	}
+	a.tick(context.Background())
+	if len(*started) != 1 || !strings.HasPrefix((*started)[0], old+" ") {
+		t.Fatal(*started)
+	}
+}
+
+func fileThere(path string) bool { _, err := os.Stat(path); return err == nil }

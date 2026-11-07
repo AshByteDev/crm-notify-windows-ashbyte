@@ -1,7 +1,8 @@
 // Package managed is what lies next to the .exe: config.json and the files of the versions. AshCRM-Notify.exe keeps its
 // name (the shortcut and autostart point at it) and starts the newest AshCRM-Notify-X.Y.Z.exe next to it. A new version
-// is never written over a running file: it arrives as a new file (docs/APP_SPEC.md §7). The package knows nothing of
-// windows and is tested on any system.
+// is never written over a running file: it arrives as a new file (docs/APP_SPEC.md §7). Since RunSince the version runs
+// from a copy with a constant name too, AshCRM-Notify-app.exe: Windows keeps «always show the icon» by the path of the
+// file. The package knows nothing of windows and is tested on any system.
 package managed
 
 import (
@@ -17,11 +18,18 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
 	// ExeName is the file of a release and the constant name of the app.
 	ExeName = "AshCRM-Notify.exe"
+	// RunName is the copy of the version that runs: the same path for every version, so Windows keeps the settings of
+	// the icon. The running file is never overwritten: it is renamed aside (Windows allows that) and the new copy takes
+	// its name.
+	RunName = "AshCRM-Notify-app.exe"
+	// RunSince is the first version that runs from RunName; an older one (a pin back) runs from its own file, as before.
+	RunSince = "0.0.16"
 	// ConfigName is the file of settings next to the .exe.
 	ConfigName = "config.json"
 	// Repo is the repository of the releases.
@@ -129,6 +137,9 @@ func FileName(version string) string { return "AshCRM-Notify-" + version + ".exe
 // IsVersion: the path is the file of a version, not the constant name.
 func IsVersion(path string) bool { return versioned.MatchString(filepath.Base(path)) }
 
+// IsRun: the path is the running copy with the constant name.
+func IsRun(path string) bool { return strings.EqualFold(filepath.Base(path), RunName) }
+
 // Found is a file of a version.
 type Found struct{ Version, Path string }
 
@@ -169,22 +180,97 @@ func Target(dir, pin, own string) (Found, bool) {
 
 // Verify checks a file against the .sha256 next to it.
 func Verify(path string) error {
-	b, err := os.ReadFile(path + ".sha256")
+	want, err := expected(path)
 	if err != nil {
 		return err
-	}
-	f := strings.Fields(strings.TrimPrefix(string(b), bom))
-	if len(f) == 0 || len(f[0]) != 64 {
-		return errors.New("в файле .sha256 нет контрольной суммы")
 	}
 	have, err := Sum(path)
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(have, f[0]) {
+	if !strings.EqualFold(have, want) {
 		return errors.New("контрольная сумма не совпала")
 	}
 	return nil
+}
+
+// expected is the sum written in the .sha256 of a file.
+func expected(path string) (string, error) {
+	b, err := os.ReadFile(path + ".sha256")
+	if err != nil {
+		return "", err
+	}
+	f := strings.Fields(strings.TrimPrefix(string(b), bom))
+	if len(f) == 0 || len(f[0]) != 64 {
+		return "", errors.New("в файле .sha256 нет контрольной суммы")
+	}
+	return f[0], nil
+}
+
+// Prepare is the file to start for a version: RunName when it holds exactly this version (by the sum of its .sha256),
+// after putting it there when write allows. Otherwise — an older version, no right to write, a failure — the file of the
+// version itself, as before RunSince: the app works, only Windows may forget the icon.
+func Prepare(dir string, t Found, write bool) string {
+	if Newer(RunSince, t.Version) {
+		return t.Path
+	}
+	want, err := expected(t.Path)
+	if err != nil {
+		return t.Path
+	}
+	run := filepath.Join(dir, RunName)
+	if have, err := Sum(run); err == nil && strings.EqualFold(have, want) {
+		return run
+	}
+	if !write || install(dir, t.Path, want) != nil {
+		return t.Path
+	}
+	return run
+}
+
+// install copies a version into RunName. A copy whose sum differs never takes the name; the running RunName is renamed
+// aside first (it cannot be replaced while it runs) and comes back if the new one cannot take its place.
+func install(dir, from, want string) (err error) {
+	src, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	tmp, err := os.CreateTemp(dir, "AshCRM-Notify-app.*.part")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	h := sha256.New()
+	_, err = io.Copy(io.MultiWriter(tmp, h), io.LimitReader(src, maxExe+1))
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), want) {
+		return errors.New("контрольная сумма не совпала")
+	}
+	if err = os.Chmod(tmp.Name(), 0o755); err != nil {
+		return err
+	}
+	run := filepath.Join(dir, RunName)
+	aside := ""
+	if _, serr := os.Stat(run); serr == nil {
+		aside = filepath.Join(dir, fmt.Sprintf("AshCRM-Notify-app.%d.old", time.Now().UnixNano()))
+		if err = os.Rename(run, aside); err != nil {
+			return err
+		}
+	}
+	if err = os.Rename(tmp.Name(), run); err != nil && aside != "" {
+		_ = os.Rename(aside, run)
+	}
+	return err
 }
 
 // Sum is the SHA-256 of a file.
@@ -240,12 +326,14 @@ func Store(dir, version, sum string, body io.Reader) (path string, err error) {
 	return path, nil
 }
 
-// Cleanup keeps the two newest versions, the pinned one and the running one. A file someone still runs cannot be
-// removed on Windows: it stays until a later pass. Its .sha256 goes only with it.
+// Cleanup keeps the two newest versions, the pinned one and the running one, and removes the old copies of RunName. A
+// file someone still runs cannot be removed on Windows: it stays until a later pass. Its .sha256 goes only with it.
 func Cleanup(dir, pin, own string) {
-	if tmp, err := filepath.Glob(filepath.Join(dir, "AshCRM-Notify-*.tmp")); err == nil {
-		for _, f := range tmp {
-			_ = os.Remove(f)
+	for _, pattern := range []string{"AshCRM-Notify-*.tmp", "AshCRM-Notify-app.*.part", "AshCRM-Notify-app.*.old"} {
+		if tmp, err := filepath.Glob(filepath.Join(dir, pattern)); err == nil {
+			for _, f := range tmp {
+				_ = os.Remove(f) // a copy that still runs stays until a later pass
+			}
 		}
 	}
 	for i, f := range List(dir) {

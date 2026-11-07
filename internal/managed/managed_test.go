@@ -180,3 +180,71 @@ func TestWritable(t *testing.T) {
 		t.Fatal("no folder")
 	}
 }
+
+func TestIsRun(t *testing.T) {
+	if !IsRun(`C:\x\ashcrm-notify-app.exe`) && !IsRun("/x/AshCRM-Notify-app.exe") || IsRun("/x/AshCRM-Notify.exe") {
+		t.Fatal("IsRun")
+	}
+}
+
+// A version from RunSince moves into the file with the constant name; the running copy is renamed aside, not
+// overwritten, and goes with the cleanup.
+func TestPrepare(t *testing.T) {
+	dir := t.TempDir()
+	run := filepath.Join(dir, RunName)
+	old := version(t, dir, "0.0.15")
+	if got := Prepare(dir, Found{"0.0.15", old}, true); got != old || exists(run) {
+		t.Fatal("before RunSince", got)
+	}
+	first := version(t, dir, RunSince)
+	if got := Prepare(dir, Found{RunSince, first}, false); got != first || exists(run) {
+		t.Fatal("no right to write", got)
+	}
+	if got := Prepare(dir, Found{RunSince, first}, true); got != run {
+		t.Fatal(got)
+	}
+	if b, _ := os.ReadFile(run); string(b) != "exe "+RunSince {
+		t.Fatal(string(b))
+	}
+	if got := Prepare(dir, Found{RunSince, first}, false); got != run {
+		t.Fatal("already in place", got)
+	}
+	next := version(t, dir, "0.0.17")
+	if got := Prepare(dir, Found{"0.0.17", next}, true); got != run {
+		t.Fatal(got)
+	}
+	if b, _ := os.ReadFile(run); string(b) != "exe 0.0.17" {
+		t.Fatal(string(b))
+	}
+	aside, _ := filepath.Glob(filepath.Join(dir, "AshCRM-Notify-app.*.old"))
+	if len(aside) != 1 {
+		t.Fatal(aside)
+	}
+	if b, _ := os.ReadFile(aside[0]); string(b) != "exe "+RunSince {
+		t.Fatal(string(b))
+	}
+	// a pin back to the version before: the same file again
+	if got := Prepare(dir, Found{RunSince, first}, true); got != run {
+		t.Fatal(got)
+	}
+	if b, _ := os.ReadFile(run); string(b) != "exe "+RunSince {
+		t.Fatal(string(b))
+	}
+	Cleanup(dir, "", RunSince)
+	if left, _ := filepath.Glob(filepath.Join(dir, "AshCRM-Notify-app.*")); len(left) != 1 || left[0] != run {
+		t.Fatal(left)
+	}
+}
+
+// A changed file of a version never takes the constant name.
+func TestPrepareWrongFile(t *testing.T) {
+	dir := t.TempDir()
+	path := version(t, dir, "0.0.17")
+	write(t, path, "changed")
+	if got := Prepare(dir, Found{"0.0.17", path}, true); got != path || exists(filepath.Join(dir, RunName)) {
+		t.Fatal(got)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "AshCRM-Notify-app.*")); len(left) != 0 {
+		t.Fatal(left)
+	}
+}

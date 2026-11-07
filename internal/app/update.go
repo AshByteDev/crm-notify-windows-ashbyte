@@ -172,7 +172,7 @@ func (a *App) Update(ctx context.Context) error {
 		a.setState(a.View().State, "обновление не удалось: "+err.Error())
 		return err
 	}
-	a.restart(path)
+	a.restart(a.prepare(managed.Found{Version: r.Version, Path: path}))
 	return nil
 }
 
@@ -188,6 +188,9 @@ func (a *App) Fetch(ctx context.Context) error {
 		if _, err := a.store(ctx, r); err != nil {
 			return err
 		}
+	}
+	if t, ok := managed.Target(a.here(), pin, ""); ok {
+		a.prepare(t) // the copies of the people move into AshCRM-Notify-app.exe on their next look
 	}
 	managed.Cleanup(a.here(), pin, a.Version)
 	return nil
