@@ -29,6 +29,7 @@ const (
 	moreH    = 32
 	dot      = 20 // the place of a coloured circle of a card, what a click hits
 	dotDraw  = 18 // the circle drawn in it (TZ: at least 16)
+	headH    = 62 // the band with the sign at the top of the windows
 	dotGap   = 8  // between them (TZ: at least 6)
 	gap      = 8
 	margin   = 12
@@ -260,36 +261,28 @@ func (u *UI) syncScale() bool {
 // ---- tray ----
 
 func (u *UI) iconFor(v app.View) (string, uintptr) {
-	key := "off"
-	switch {
-	case v.State != app.Online:
-	case v.DND:
-		key = "dnd"
-	default:
-		key = "on"
-	}
-	if v.Queue.Unread > 0 {
-		key += "-dot"
-	}
-	size := int(16*u.scale + 0.5)
-	if size < 16 {
-		size = 16
-	}
-	cached := fmt.Sprint(key, size)
+	o := LogoOptions{Large: true, Offline: v.State != app.Online, DND: v.State == app.Online && v.DND, Unread: v.Queue.Unread > 0}
+	key := fmt.Sprint(o.Offline, o.DND, o.Unread)
+	size := max(int(16*u.scale+0.5), 16)
+	return key, u.iconOf(fmt.Sprint(key, size), size, o)
+}
+
+// iconOf is an icon of the sign of AshCRM, made once per look and size.
+func (u *UI) iconOf(cached string, size int, o LogoOptions) uintptr {
 	if h, ok := u.icons[cached]; ok {
-		return key, h
+		return h
 	}
-	bg := ColorOffline
-	if strings.HasPrefix(key, "on") {
-		bg = ColorOnline
-	} else if strings.HasPrefix(key, "dnd") {
-		bg = ColorDND
-	}
-	png := IconPNG(size*2, bg, strings.HasSuffix(key, "-dot"))
+	png := LogoPNG(size, o)
 	h, _, _ := pCreateIconFromResourceEx.Call(uintptr(unsafe.Pointer(&png[0])), uintptr(len(png)), 1, 0x00030000,
 		uintptr(size), uintptr(size), 0)
 	u.icons[cached] = h
-	return key, h
+	return h
+}
+
+// windowIcons are the big and the small icon of the windows of the app (the caption, Alt+Tab, the taskbar).
+func (u *UI) windowIcons() (big, small uintptr) {
+	b, s := max(int(32*u.scale+0.5), 32), max(int(16*u.scale+0.5), 16)
+	return u.iconOf(fmt.Sprint("window", b), b, LogoOptions{}), u.iconOf(fmt.Sprint("window", s), s, LogoOptions{Large: true})
 }
 
 func tipOf(v app.View) string {
@@ -889,6 +882,12 @@ var (
 	colMoreHov = rgb(0x45, 0x4C, 0x55)
 	colMoreBg  = rgb(0x2B, 0x31, 0x38)
 	colWhite   = rgb(0xFF, 0xFF, 0xFF)
+	// the colours of the CRM (logo.go): the band and the main buttons of the windows
+	colNavy    = rgb(0x19, 0x37, 0x5F)
+	colNavyHov = rgb(0x24, 0x45, 0x74)
+	colNavyOff = rgb(0xA9, 0xB4, 0xC2)
+	colSilver  = rgb(0xC4, 0xCB, 0xD4)
+	colNavyBg  = rgb(0xDC, 0xE4, 0xEF) // the chosen place in the settings
 )
 
 func (u *UI) font(size int, bold bool) uintptr {
@@ -1088,11 +1087,37 @@ func (u *UI) circle(p painter, s *slot, r rect, sign string, hit int, st dotStyl
 		pix = bgra(dotImage(int(size), st, sign, hover, rgba(0xFF, 0xFF, 0xFF))) // the card is always white
 		u.dots[key] = pix
 	}
-	bi := bitmapInfo{Width: size, Height: -size, Planes: 1, BitCount: 32}
+	p.pixels(pix, r.Left+(r.Right-r.Left-size)/2, r.Top+(r.Bottom-r.Top-size)/2, size, size)
+}
+
+// pixels puts a picture drawn by the app (bgra) at x, y.
+func (p painter) pixels(pix []byte, x, y, w, h int32) {
+	bi := bitmapInfo{Width: w, Height: -h, Planes: 1, BitCount: 32}
 	bi.Size = uint32(unsafe.Sizeof(bi))
-	x, y := r.Left+(r.Right-r.Left-size)/2, r.Top+(r.Bottom-r.Top-size)/2
-	pSetDIBitsToDevice.Call(p.dc, uintptr(x), uintptr(y), uintptr(size), uintptr(size), 0, 0, 0, uintptr(size),
+	pSetDIBitsToDevice.Call(p.dc, uintptr(x), uintptr(y), uintptr(w), uintptr(h), 0, 0, 0, uintptr(h),
 		uintptr(unsafe.Pointer(&pix[0])), ptr(&bi), 0)
+}
+
+// header is the band of the windows of the app in the colours of the CRM: the sign, «AshCRM Notify» and what the
+// window is for.
+func (u *UI) header(p painter, w int32, what string) {
+	h := u.pi(headH)
+	p.fill(rect{0, 0, w, h}, colNavy)
+	size := u.pi(36)
+	key := fmt.Sprint("logo", size)
+	if u.dots == nil {
+		u.dots = map[string][]byte{}
+	}
+	pix, ok := u.dots[key]
+	if !ok {
+		pix = bgra(onto(Logo(int(size), LogoOptions{}), navyMid))
+		u.dots[key] = pix
+	}
+	left := u.pi(20)
+	p.pixels(pix, left, (h-size)/2, size, size)
+	x := left + size + u.pi(12)
+	p.text("AshCRM Notify", rect{x, u.pi(10), w - u.pi(16), u.pi(32)}, u.font(15, true), colWhite, dtSingleLine|dtVCenter)
+	p.text(what, rect{x, u.pi(31), w - u.pi(16), u.pi(52)}, u.font(12, false), colSilver, dtSingleLine|dtVCenter)
 }
 
 // hintOf is the word of a circle.

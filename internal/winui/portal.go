@@ -14,7 +14,7 @@ const (
 	idEdit  = 101
 	idError = 102
 	portalW = 440
-	portalH = 200
+	portalH = 200 + headH
 )
 
 type portal struct {
@@ -23,10 +23,15 @@ type portal struct {
 	busy                        bool
 }
 
+// whiteBrush paints the window and its texts white, as the cards and the settings.
+var whiteBrush uintptr
+
 func (u *UI) registerPortal() error {
 	c := wndClassEx{WndProc: syscall.NewCallback(u.portalProc), Instance: u.inst, ClassName: utf16("AshCRMNotifyPortal")}
-	c.Background, _, _ = pGetSysColorBrush.Call(colorWindow)
+	whiteBrush, _, _ = pCreateSolidBrush.Call(colBg)
+	c.Background = whiteBrush
 	c.Cursor, _, _ = pLoadCursorW.Call(0, idcArrow)
+	c.Icon, c.IconSm = u.windowIcons()
 	c.Size = uint32(unsafe.Sizeof(c))
 	if r, _, err := pRegisterClassExW.Call(ptr(&c)); r == 0 {
 		return err
@@ -43,7 +48,7 @@ func (u *UI) child(class, text string, style uintptr, ex uintptr, x, y, w, h int
 
 // centered creates a hidden window with a caption in the middle of the screen; w and h are the logical client size.
 func (u *UI) centered(class, title string, w, h int) uintptr {
-	style := uintptr(wsOverlapped | wsCaption | wsSysMenu)
+	style := uintptr(wsOverlapped | wsCaption | wsSysMenu | wsClipChildren)
 	r := rect{0, 0, u.pi(w), u.pi(h)}
 	pAdjustWindowRectEx.Call(ptr(&r), style, 0, 0)
 	fw, fh := r.Right-r.Left, r.Bottom-r.Top
@@ -62,12 +67,14 @@ func (u *UI) showPortal(prefill string) {
 		return
 	}
 	u.portal.hwnd = u.centered("AshCRMNotifyPortal", "AshCRM Notify — подключение", portalW, portalH)
-	title := u.child("STATIC", "Адрес портала AshCRM", 0, 0, 20, 16, 400, 22, 0)
+	top := headH // under the band with the sign
+	title := u.child("STATIC", "Адрес портала AshCRM", 0, 0, 20, top+16, 400, 22, 0)
 	pSendMessageW.Call(title, wmSetFont, u.font(15, true), 1)
-	u.child("STATIC", "Тот же адрес, по которому вы открываете CRM в браузере, например crm.company.ru", 0, 0, 20, 42, 400, 36, 0)
-	u.portal.edit = u.child("EDIT", prefill, wsTabStop|wsBorder|esAutoHScroll, 0, 20, 84, 400, 28, idEdit)
-	u.portal.errText = u.child("STATIC", "", 0, 0, 20, 120, 400, 36, idError)
-	u.portal.button = u.child("BUTTON", "Подключиться", wsTabStop|bsDefPushButton, 0, 280, 156, 140, 32, idOK)
+	u.child("STATIC", "Тот же адрес, по которому вы открываете CRM в браузере, например crm.company.ru", 0, 0, 20, top+42, 400, 36, 0)
+	u.portal.edit = u.child("EDIT", prefill, wsTabStop|wsBorder|esAutoHScroll, 0, 20, top+84, 400, 28, idEdit)
+	u.portal.errText = u.child("STATIC", "", 0, 0, 20, top+120, 400, 36, idError)
+	// drawn by the app in the colours of the CRM; Enter still presses it (dmGetDefID)
+	u.portal.button = u.child("BUTTON", "Подключиться", wsTabStop|bsOwnerDraw, 0, 280, top+156, 140, 32, idOK)
 	pShowWindow.Call(u.portal.hwnd, swShow)
 	pSetForegroundWindow.Call(u.portal.hwnd)
 	pSetFocus.Call(u.portal.edit)
@@ -133,17 +140,47 @@ func (u *UI) portalProc(hwnd, m, wp, lp uintptr) uintptr {
 			u.submitPortal()
 			return 0
 		}
+	case wmPaint:
+		u.buffered(hwnd, func(p painter, cr rect) {
+			p.fill(cr, colBg)
+			u.header(p, cr.Right, "Подключение к порталу")
+		})
+		return 0
+	case wmEraseBkgnd:
+		return 1
+	case wmDrawItem:
+		u.drawPortalButton(*(**drawItem)(unsafe.Pointer(&lp))) // lp points at DRAWITEMSTRUCT
+		return 1
+	case dmGetDefID:
+		return idOK | dcHasDefID<<16
 	case wmCtlColorStatic:
+		color := colBody
 		if lp == u.portal.errText && u.portal.err != "" && !u.portal.busy {
-			pSetTextColor.Call(wp, rgb(0xD0, 0x30, 0x30))
-			pSetBkMode.Call(wp, transparentMode)
-			b, _, _ := pGetSysColorBrush.Call(colorWindow)
-			return b
+			color = rgb(0xD0, 0x30, 0x30)
 		}
+		pSetTextColor.Call(wp, color)
+		pSetBkMode.Call(wp, transparentMode)
+		return whiteBrush
 	case wmClose:
 		pShowWindow.Call(hwnd, swHide) // the app stays in the tray; a click on the icon brings the window back
 		return 0
 	}
 	r, _, _ := pDefWindowProcW.Call(hwnd, m, wp, lp)
 	return r
+}
+
+// drawPortalButton paints «Подключиться»: navy as the main buttons of the CRM, pale while the address is checked.
+func (u *UI) drawPortalButton(d *drawItem) {
+	p := painter{u: u, dc: d.DC}
+	pSetBkMode.Call(d.DC, transparentMode)
+	p.fill(d.Rect, colBg)
+	bg := colNavy
+	switch {
+	case d.State&odsDisabled != 0:
+		bg = colNavyOff
+	case d.State&odsSelected != 0:
+		bg = colNavyHov
+	}
+	p.round(d.Rect, bg, bg, u.pi(8))
+	p.text(windowText(d.Item), d.Rect, u.font(13, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
 }
