@@ -79,6 +79,7 @@ var (
 	pCreateCompatibleBitmap = gdi32.NewProc("CreateCompatibleBitmap")
 	pBitBlt                 = gdi32.NewProc("BitBlt")
 	pDeleteDC               = gdi32.NewProc("DeleteDC")
+	pSetDIBitsToDevice      = gdi32.NewProc("SetDIBitsToDevice")
 
 	pShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
 
@@ -210,6 +211,21 @@ type wndClassEx struct {
 	MenuName   *uint16
 	ClassName  *uint16
 	IconSm     uintptr
+}
+
+// bitmapInfo is BITMAPINFOHEADER: a 32-bit top-down DIB (negative height), no palette.
+type bitmapInfo struct {
+	Size          uint32
+	Width         int32
+	Height        int32
+	Planes        uint16
+	BitCount      uint16
+	Compression   uint32
+	SizeImage     uint32
+	XPelsPerMeter int32
+	YPelsPerMeter int32
+	ClrUsed       uint32
+	ClrImportant  uint32
 }
 
 type paintStruct struct {
