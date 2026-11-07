@@ -27,7 +27,8 @@ const (
 	serviceH = 116 // the cards with worded buttons
 	talkH    = 108 // «Разговор»: the title, the number, a row of worded buttons (contract 1.4)
 	moreH    = 32
-	dot      = 20 // the coloured circles of a card (TZ: at least 16)
+	dot      = 20 // the place of a coloured circle of a card, what a click hits
+	dotDraw  = 18 // the circle drawn in it (TZ: at least 16)
 	dotGap   = 8  // between them (TZ: at least 6)
 	gap      = 8
 	margin   = 12
@@ -71,7 +72,7 @@ const (
 	hitLogin
 	hitHideAll // the words of the strip
 	hitReadAll
-	hitAct1    // the buttons of «Разговор»: «Карточка клиента», «Написать в …», «▾»
+	hitAct1 // the buttons of «Разговор»: «Карточка клиента», «Написать в …», «▾»
 	hitAct2
 	hitActMenu
 )
@@ -105,7 +106,8 @@ type UI struct {
 	slots     [slotMax]*slot
 	byHwnd    map[uintptr]*slot
 	fonts     map[string]uintptr
-	signinOK  bool // the person closed the «sign in» card
+	dots      map[string][]byte // the pixels of the circles by colour, sign, hover and size
+	signinOK  bool              // the person closed the «sign in» card
 
 	portal       portal
 	portalAsked  bool
@@ -872,24 +874,21 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 // ---- painting ----
 
 var (
-	colBg       = rgb(0xFF, 0xFF, 0xFF)
-	colBorder   = rgb(0xDD, 0xE3, 0xEA)
-	colTitle    = rgb(0x14, 0x18, 0x1D)
-	colBody     = rgb(0x45, 0x4C, 0x55)
-	colMuted    = rgb(0x8A, 0x93, 0x9E)
-	colBlue     = rgb(0x33, 0x90, 0xEC)
-	colGreen    = rgb(0x2E, 0xAD, 0x5B)
-	colOrange   = rgb(0xF0, 0x9A, 0x1A)
-	colBtn      = rgb(0xEE, 0xF1, 0xF5)
-	colBtnHov   = rgb(0xE1, 0xE6, 0xEC)
-	colBlueHov  = rgb(0x24, 0x7C, 0xD6)
-	colGreenHov = rgb(0x23, 0x8F, 0x4A)
-	colRed      = rgb(0xE0, 0x45, 0x45)
-	colRedHov   = rgb(0xC2, 0x33, 0x33)
-	colHint     = rgb(0x2B, 0x31, 0x38)
-	colMoreHov  = rgb(0x45, 0x4C, 0x55)
-	colMoreBg   = rgb(0x2B, 0x31, 0x38)
-	colWhite    = rgb(0xFF, 0xFF, 0xFF)
+	colBg      = rgb(0xFF, 0xFF, 0xFF)
+	colBorder  = rgb(0xDD, 0xE3, 0xEA)
+	colTitle   = rgb(0x14, 0x18, 0x1D)
+	colBody    = rgb(0x45, 0x4C, 0x55)
+	colMuted   = rgb(0x8A, 0x93, 0x9E)
+	colBlue    = rgb(0x33, 0x90, 0xEC)
+	colGreen   = rgb(0x2E, 0xAD, 0x5B)
+	colOrange  = rgb(0xF0, 0x9A, 0x1A)
+	colBtn     = rgb(0xEE, 0xF1, 0xF5)
+	colBtnHov  = rgb(0xE1, 0xE6, 0xEC)
+	colBlueHov = rgb(0x24, 0x7C, 0xD6)
+	colHint    = rgb(0x2B, 0x31, 0x38)
+	colMoreHov = rgb(0x45, 0x4C, 0x55)
+	colMoreBg  = rgb(0x2B, 0x31, 0x38)
+	colWhite   = rgb(0xFF, 0xFF, 0xFF)
 )
 
 func (u *UI) font(size int, bold bool) uintptr {
@@ -1027,9 +1026,9 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 	} else {
 		p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(70)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
 	}
-	u.circle(p, s, read, "✓", hitRead, colGreen, colGreenHov)
-	u.circle(p, s, open, "↗", hitOpen, colBlue, colBlueHov)
-	u.circle(p, s, cl, "✕", hitClose, colRed, colRedHov)
+	u.circle(p, s, read, "✓", hitRead, dotGreen)
+	u.circle(p, s, open, "↗", hitOpen, dotBlue)
+	u.circle(p, s, cl, "✕", hitClose, dotRed)
 	hint := hintOf(s.hover)
 	if call && s.hover == hitClose {
 		hint = "Пропустить" // only here: the call goes on
@@ -1072,17 +1071,28 @@ func (u *UI) drawTalkButtons(p painter, s *slot) {
 	}
 }
 
-// circle is a button of the first line of a card: a coloured circle with a white sign (not only the colour tells them
-// apart). An empty rect — no such button on this card.
-func (u *UI) circle(p painter, s *slot, r rect, glyph string, hit int, color, hover uintptr) {
+// circle is a button of the first line of a card: a smooth coloured circle with a sign (not only the colour tells them
+// apart), drawn by dotImage. An empty rect — no such button on this card.
+func (u *UI) circle(p painter, s *slot, r rect, sign string, hit int, st dotStyle) {
 	if r.Right == 0 {
 		return
 	}
-	if s.hover == hit {
-		color = hover
+	size := u.pi(dotDraw)
+	hover := s.hover == hit
+	key := fmt.Sprint(st.fill, sign, hover, size)
+	if u.dots == nil {
+		u.dots = map[string][]byte{}
 	}
-	p.round(r, color, color, r.Right-r.Left)
-	p.text(glyph, r, u.symbolFont(10), colWhite, dtSingleLine|dtVCenter|dtCenter)
+	pix, ok := u.dots[key]
+	if !ok {
+		pix = bgra(dotImage(int(size), st, sign, hover, rgba(0xFF, 0xFF, 0xFF))) // the card is always white
+		u.dots[key] = pix
+	}
+	bi := bitmapInfo{Width: size, Height: -size, Planes: 1, BitCount: 32}
+	bi.Size = uint32(unsafe.Sizeof(bi))
+	x, y := r.Left+(r.Right-r.Left-size)/2, r.Top+(r.Bottom-r.Top-size)/2
+	pSetDIBitsToDevice.Call(p.dc, uintptr(x), uintptr(y), uintptr(size), uintptr(size), 0, 0, 0, uintptr(size),
+		uintptr(unsafe.Pointer(&pix[0])), ptr(&bi), 0)
 }
 
 // hintOf is the word of a circle.
