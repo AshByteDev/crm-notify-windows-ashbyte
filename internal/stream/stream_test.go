@@ -35,7 +35,7 @@ func (r *rec) count() (int, int, int) {
 	return len(r.syncs), len(r.cards), len(r.clears)
 }
 
-// fakeCRM speaks the protocol of /ws: auth, notify.snapshot, notify.read, ping; then pushes events.
+// fakeCRM speaks the protocol of /ws: auth, notify.snapshot, notify.read, notify.read_all, ping; then pushes events.
 type fakeCRM struct {
 	mu        sync.Mutex
 	conns     int
@@ -47,6 +47,7 @@ type fakeCRM struct {
 	agents    []string
 	activity  []string // the data of the notify.activity frames, in order
 	refuseAll bool     // notify.activity is answered like by a CRM older than 1.2
+	readAll   []string // the before of notify.read_all (contract 1.5)
 }
 
 func (f *fakeCRM) frames() []string {
@@ -96,6 +97,17 @@ func (f *fakeCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			send(map[string]any{"re": in.ID, "ok": ok})
 			send(map[string]any{"type": "hello", "data": map[string]any{}})
+		case "notify.read_all":
+			var d struct{ Before string }
+			_ = json.Unmarshal(in.Data, &d)
+			f.mu.Lock()
+			f.readAll = append(f.readAll, d.Before)
+			f.mu.Unlock()
+			if d.Before == "" {
+				send(map[string]any{"re": in.ID, "ok": false, "error": map[string]any{"code": "bad_request", "message": "нет before"}})
+				continue
+			}
+			send(map[string]any{"re": in.ID, "ok": ok, "data": map[string]any{"ok": true, "read": 3}})
 		case "notify.snapshot":
 			send(map[string]any{"re": in.ID, "ok": ok, "data": api.Snapshot{Cards: []api.Card{{Key: "chat-1", Count: 2}}, Total: 1}})
 			send(map[string]any{"type": "notify.card", "data": api.Card{Key: "chat-2", Title: "Мария", Count: 1}})
@@ -168,6 +180,16 @@ func TestStreamSnapshotEventsReconnect(t *testing.T) {
 	crm.mu.Unlock()
 	if len(reads) != 1 || reads[0] != "chat-2" {
 		t.Fatalf("reads %v", reads)
+	}
+	at := time.Date(2026, 11, 10, 12, 0, 0, 0, time.FixedZone("MSK", 3*3600))
+	if err := s.ReadAll(ctx, at); err != nil {
+		t.Fatal(err)
+	}
+	crm.mu.Lock()
+	all := crm.readAll
+	crm.mu.Unlock()
+	if len(all) != 1 || all[0] != "2026-11-10T09:00:00Z" {
+		t.Fatalf("read_all %v", all)
 	}
 	if !strings.Contains(strings.Join(h.states, ","), StateOnline) {
 		t.Fatalf("states %v", h.states)

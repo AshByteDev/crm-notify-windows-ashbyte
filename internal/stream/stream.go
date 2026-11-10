@@ -443,6 +443,18 @@ func (s *Stream) Check(ctx context.Context) (api.Snapshot, error) {
 	return sn, json.Unmarshal(f.Data, &sn)
 }
 
+// ReadAll sends «Прочитать все» (contract 1.5): everything unread in the bell up to before.
+func (s *Stream) ReadAll(ctx context.Context, before time.Time) error {
+	f, err := s.request(ctx, "notify.read_all", map[string]string{"before": before.UTC().Format(time.RFC3339Nano)})
+	if err != nil {
+		return err
+	}
+	if f.Error != nil {
+		return fmt.Errorf("%w: %s", ErrRefused, f.Error.Message)
+	}
+	return nil
+}
+
 // Read sends «Прочитано» for a card.
 func (s *Stream) Read(ctx context.Context, key string) error {
 	f, err := s.request(ctx, "notify.read", map[string]string{"key": key})

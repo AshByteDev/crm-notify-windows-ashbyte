@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +36,7 @@ const (
 const activeWithin = time.Minute
 
 // Contract is the version of docs/NOTIFY_CONTRACT.md the app speaks; a CRM with another major version needs another app.
-const Contract = "1.4"
+const Contract = "1.8"
 
 // Places of the cards on the screen (the setting «Где показывать уведомления»).
 const (
@@ -121,6 +122,8 @@ type App struct {
 	refreshMu sync.Mutex
 	syncing   sync.Mutex // one look at the folder of the administrator at a time
 	paused    bool       // the person left the session of Windows
+	// crmContract is the version of the contract of the CRM (hello); "" — not connected yet.
+	crmContract string
 	// «Прочитать все»: how many are still to read and up to what moment.
 	readAllLeft int
 	readAllAt   time.Time
@@ -524,11 +527,33 @@ func (a *App) sendUnsent() {
 // ReadAll reads everything unread at this moment. The app holds at most a snapshot of the cards, the rest comes with
 // the next notify.sync: only what was there when the person asked is read, a newer message stays.
 func (a *App) ReadAll(ctx context.Context) {
-	left := a.Q.View().Unread
+	left, at := a.Q.View().Unread, time.Now()
 	a.mu.Lock()
-	a.readAllLeft, a.readAllAt = left, time.Now()
+	s, whole := a.stream, atLeast(a.crmContract, "1.5")
+	if !whole {
+		a.readAllLeft, a.readAllAt = left, at
+	}
 	a.mu.Unlock()
-	a.readNext(ctx)
+	if !whole || s == nil {
+		a.readNext(ctx)
+		return
+	}
+	// contract 1.5: one notify.read_all reads the whole bell up to the click, beyond the cards the app holds
+	keys := a.Q.Unread(at)
+	for _, k := range keys {
+		a.Q.Dismiss(k)
+	}
+	a.changed()
+	go func() {
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		if err := s.ReadAll(cctx, at); err != nil {
+			a.log().Warn("read all", "err", err)
+			for _, k := range keys { // at least the cards of the app, one by one
+				a.sendRead(ctx, s, k)
+			}
+		}
+	}()
 }
 
 // readNext reads the cards the app has now from those asked for.
@@ -674,6 +699,9 @@ func (h handler) Contract(v string) {
 	if v == "" {
 		v = "1.0" // CRM 0.0.40 before the field: contract 1.0
 	}
+	h.a.mu.Lock()
+	h.a.crmContract = v
+	h.a.mu.Unlock()
 	if major(v) != major(Contract) {
 		h.a.mu.Lock()
 		h.a.lastError = "портал работает по контракту " + v + ", приложение — " + Contract + ": обновите приложение"
@@ -685,6 +713,19 @@ func (h handler) Contract(v string) {
 }
 
 func major(v string) string { m, _, _ := strings.Cut(v, "."); return m }
+
+// atLeast: the version of a contract v is not older than want ("1.5" < "1.10").
+func atLeast(v, want string) bool {
+	parse := func(s string) (int, int) {
+		a, b, _ := strings.Cut(s, ".")
+		x, _ := strconv.Atoi(a)
+		y, _ := strconv.Atoi(b)
+		return x, y
+	}
+	va, vb := parse(v)
+	wa, wb := parse(want)
+	return va > wa || va == wa && vb >= wb
+}
 
 func (h handler) State(s string) {
 	if s == stream.StateSignedOut {

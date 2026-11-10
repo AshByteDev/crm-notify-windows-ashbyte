@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -283,8 +284,11 @@ func TestNotifyCheckSignedOutAndDND(t *testing.T) {
 
 // allCRM counts notify.read and gives a card that came after the click in every snapshot.
 type allCRM struct {
-	mu    sync.Mutex
-	reads []string
+	mu       sync.Mutex
+	reads    []string
+	contract string   // sent in hello; "" — no hello, as CRM 0.0.40
+	before   []string // notify.read_all
+	refuse   bool     // notify.read_all answers with an error
 }
 
 func (f *allCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -293,6 +297,13 @@ func (f *allCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	f.mu.Lock()
+	contract := f.contract
+	f.mu.Unlock()
+	if contract != "" {
+		b, _ := json.Marshal(map[string]any{"type": "hello", "data": map[string]any{"notify_contract": contract}})
+		_ = c.Write(ctx, websocket.MessageText, b)
+	}
 	for {
 		_, raw, err := c.Read(ctx)
 		if err != nil {
@@ -300,7 +311,7 @@ func (f *allCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var in struct {
 			ID, Type string
-			Data     struct{ Key string }
+			Data     struct{ Key, Before string }
 		}
 		_ = json.Unmarshal(raw, &in)
 		answer := map[string]any{"re": in.ID, "ok": true, "data": map[string]any{}}
@@ -310,6 +321,13 @@ func (f *allCRM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "notify.read":
 			f.mu.Lock()
 			f.reads = append(f.reads, in.Data.Key)
+			f.mu.Unlock()
+		case "notify.read_all":
+			f.mu.Lock()
+			f.before = append(f.before, in.Data.Before)
+			if f.refuse {
+				answer = map[string]any{"re": in.ID, "ok": false, "error": map[string]any{"code": "bad_request", "message": "нет"}}
+			}
 			f.mu.Unlock()
 		}
 		b, _ := json.Marshal(answer)
@@ -361,5 +379,60 @@ func TestReadAllContinuesAfterSync(t *testing.T) {
 	})
 	if _, ok := a.Q.Get("chat-9"); !ok {
 		t.Fatal("a newer message is read blindly")
+	}
+}
+
+// Contract 1.5: «Прочитать все» is one notify.read_all with the moment of the click: the CRM reads the whole bell.
+func TestReadAllWhole(t *testing.T) {
+	crm := &allCRM{contract: "1.8"}
+	srv := httptest.NewServer(crm)
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := online(t, ctx, srv.URL)
+	eventually(t, "hello", func() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.crmContract == "1.8" })
+	old := time.Now().Add(-time.Hour)
+	a.Q.Card(api.Card{Key: "chat-2", Count: 1, At: old})
+	a.Q.Card(api.Card{Key: "chat-3", Count: 1, At: old})
+	click := time.Now()
+	a.ReadAll(ctx)
+	if v := a.View(); v.Queue.Unread != 0 {
+		t.Fatalf("the cards stay: %+v", v.Queue)
+	}
+	eventually(t, "read_all", func() bool { crm.mu.Lock(); defer crm.mu.Unlock(); return len(crm.before) == 1 })
+	crm.mu.Lock()
+	defer crm.mu.Unlock()
+	at, err := time.Parse(time.RFC3339Nano, crm.before[0])
+	if err != nil || at.Before(click.Add(-time.Second)) || at.After(time.Now()) {
+		t.Fatal(crm.before, err)
+	}
+	if len(crm.reads) != 0 {
+		t.Fatal("notify.read too", crm.reads)
+	}
+}
+
+// A refused notify.read_all still reads the cards of the app one by one.
+func TestReadAllWholeRefused(t *testing.T) {
+	crm := &allCRM{contract: "1.5", refuse: true}
+	srv := httptest.NewServer(crm)
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := online(t, ctx, srv.URL)
+	eventually(t, "hello", func() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.crmContract == "1.5" })
+	a.Q.Card(api.Card{Key: "chat-2", Count: 1, At: time.Now().Add(-time.Hour)})
+	a.ReadAll(ctx)
+	eventually(t, "read one by one", func() bool {
+		crm.mu.Lock()
+		defer crm.mu.Unlock()
+		return slices.Contains(crm.reads, "chat-2") && len(crm.before) == 1
+	})
+}
+
+func TestAtLeast(t *testing.T) {
+	for v, want := range map[string]bool{"1.5": true, "1.8": true, "1.10": true, "2.0": true, "1.4": false, "1.0": false, "": false} {
+		if atLeast(v, "1.5") != want {
+			t.Error(v)
+		}
 	}
 }
