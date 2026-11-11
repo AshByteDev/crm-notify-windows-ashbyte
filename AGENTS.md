@@ -13,6 +13,7 @@
 * [`docs/CRM_TERMINAL_SERVER.md`](docs/CRM_TERMINAL_SERVER.md) — ТЗ для CRM: работа на терминальном сервере.
 * [`docs/CRM_READ.md`](docs/CRM_READ.md) — ТЗ для CRM: «Прочитано» и «Прочитать все» читают колокольчик (контракт 1.5, выполнено в CRM 0.1.5).
 * [`docs/CRM_REPLY.md`](docs/CRM_REPLY.md) — ТЗ для CRM: быстрый ответ из карточки (контракт 1.10, выполнено в CRM 0.2.8).
+* [`docs/CRM_STICKERS.md`](docs/CRM_STICKERS.md) — ТЗ для CRM: стикеры в карточке, общее хранилище на компьютере (ждёт контракта).
 * [`docs/CRM_CALLS.md`](docs/CRM_CALLS.md) — ТЗ для CRM: карточка разговора с клиентом (контракт 1.4, выполнено в CRM 0.0.66).
 Документация и общение — на русском.
 
