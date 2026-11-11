@@ -22,7 +22,6 @@ import (
 
 // Logical sizes (scaled by the DPI of the screen).
 const (
-	cardW    = 360
 	cardH    = 76  // the line of the sender and two lines of the message
 	serviceH = 116 // the cards with worded buttons
 	talkH    = 108 // «Разговор»: the title, the number, a row of worded buttons (contract 1.4)
@@ -115,6 +114,9 @@ type UI struct {
 	portalResult atomic.Pointer[error]
 
 	settings settings
+
+	rep   replyUI    // the field of the answer
+	draft *app.Draft // the answer being written (app.View.Reply of the last refresh)
 }
 
 // AlreadyRunning holds a named mutex for the session of the user: a second start just exits.
@@ -207,7 +209,7 @@ func (u *UI) Run() error {
 	u.trayMsg = uint32(tm)
 	for i := range u.slots {
 		h, _, _ := pCreateWindowExW.Call(wsExTopmost|wsExToolWindow|wsExNoActivate, uintptr(unsafe.Pointer(cardClass.ClassName)),
-			0, wsPopup, 0, 0, u.px(cardW), u.px(cardH), 0, 0, u.inst, 0)
+			0, wsPopup|wsClipChildren, 0, 0, u.px(cardW), u.px(cardH), 0, 0, u.inst, 0)
 		s := &slot{hwnd: h}
 		u.slots[i] = s
 		u.byHwnd[h] = s
@@ -354,6 +356,9 @@ func (u *UI) trayProc(hwnd, m, wp, lp uintptr) uintptr {
 		return 0
 	case wmPortalDone:
 		u.portalDone()
+		return 0
+	case wmReplyKey:
+		u.replyKey(wp)
 		return 0
 	case wmTimer:
 		if wp == timerHide {
@@ -507,6 +512,7 @@ func (u *UI) menu() {
 func (u *UI) refresh() {
 	rescaled := u.syncScale()
 	v := u.A.View()
+	u.draft = v.Reply
 	if u.settings.hwnd != 0 {
 		pInvalidateRect.Call(u.settings.hwnd, 0, 0) // the result of the check
 	}
@@ -548,6 +554,8 @@ func (u *UI) refresh() {
 			heights[i] = u.pi(serviceH)
 		case w.card.Talking():
 			heights[i] = u.pi(talkH)
+		case w.card.Reply != nil:
+			heights[i] = u.pi(int(replyLayout(w.card, v.Reply).H))
 		default:
 			heights[i] = u.pi(cardH)
 		}
@@ -562,7 +570,7 @@ func (u *UI) refresh() {
 			continue
 		}
 		w, h, at := list[i], heights[i], places[i]
-		changed := rescaled || s.kind != w.kind || s.text != w.text || !api.Same(s.card, w.card)
+		changed := rescaled || w.card.Reply != nil || s.kind != w.kind || s.text != w.text || !api.Same(s.card, w.card)
 		s.kind, s.text, s.card = w.kind, w.text, w.card
 		pSetWindowPos.Call(s.hwnd, hwndTopmost, uintptr(at.X), uintptr(at.Y), uintptr(u.pi(cardW)), uintptr(h), swpNoActivate|swpShowWindow)
 		rgn, _, _ := pCreateRoundRectRgn.Call(0, 0, uintptr(u.pi(cardW)+1), uintptr(h+1), uintptr(u.pi(radius)), uintptr(u.pi(radius)))
@@ -575,6 +583,7 @@ func (u *UI) refresh() {
 			pInvalidateRect.Call(s.hwnd, 0, 0)
 		}
 	}
+	u.syncReply()
 	u.armTimer(v.Queue.Next)
 }
 
@@ -650,6 +659,9 @@ func (u *UI) hit(s *slot, x, y int32) int {
 		return hitBody
 	}
 	open, read, cl := u.buttons(s)
+	if h := u.replyHit(s, x, y); h != hitNone {
+		return h
+	}
 	if s.kind == "card" && s.card.Talking() {
 		b1, b2, bm := u.talkRects(s)
 		switch {
@@ -794,7 +806,14 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 		if s == nil {
 			return 0
 		}
-		switch u.hit(s, loword(lp), hiword(lp)) {
+		h := u.hit(s, loword(lp), hiword(lp))
+		if u.replyClick(s, h) {
+			return 0
+		}
+		if (h == hitClose || h == hitRead) && s.kind == "card" && u.keepReply(s) {
+			return 0
+		}
+		switch h {
 		case hitClose:
 			if s.kind == "signin" {
 				u.signinOK = true
@@ -857,6 +876,14 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmDpiChanged:
 		u.refresh()
 		return 0
+	case wmDropFiles:
+		u.dropped(s, wp)
+		return 0
+	case wmSetFocus:
+		if s != nil && s == u.rep.host && u.rep.edit != 0 {
+			pSetFocus.Call(u.rep.edit)
+			return 0
+		}
 	case wmClose:
 		return 0 // Alt+F4 on a card does nothing: the card stays until an action
 	}
@@ -948,6 +975,8 @@ func accent(c api.Card) uintptr {
 	switch {
 	case c.Kind == queue.KindCall:
 		return colGreen
+	case c.From == api.FromStaff:
+		return colViolet
 	case c.Mention:
 		return colOrange
 	case c.Sound == api.SoundClient:
@@ -1012,6 +1041,7 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 		p.text(t, rect{left, 0, left + u.pi(38), u.pi(36)}, u.font(12, false), colMuted, dtSingleLine|dtVCenter)
 		left += u.pi(42)
 	}
+	left = u.badges(p, s.card, left)
 	first := cl.Left // the leftmost circle
 	for _, r := range []rect{open, read} {
 		if r.Right > 0 {
@@ -1024,6 +1054,9 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 		u.drawTalkButtons(p, s)
 	} else {
 		p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(70)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
+	}
+	if s.card.Reply != nil {
+		u.drawReply(p, s)
 	}
 	u.circle(p, s, read, "✓", hitRead, dotGreen)
 	u.circle(p, s, open, "↗", hitOpen, dotBlue)

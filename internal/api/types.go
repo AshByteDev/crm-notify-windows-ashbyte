@@ -1,7 +1,10 @@
 // Package api is the part of the AshCRM API the app uses (crm-ashbyte/docs/WINDOWS_NOTIFICATIONS_CRM_SPEC.md).
 package api
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Card is one notification card: one per chat, task, meeting, queued conversation (key).
 type Card struct {
@@ -18,6 +21,55 @@ type Card struct {
 	// gives them.
 	Call    *CallState `json:"call,omitempty"`
 	Actions []Action   `json:"actions,omitempty"`
+	// From: in a conversation with a client (contract 1.10) — who wrote last: FromClient or FromStaff (a note inside the
+	// conversation the client does not see); "" elsewhere.
+	From string `json:"from,omitempty"`
+	// Reply: the card can be answered from here now (contract 1.10 §5.8); nil — no «Ответить».
+	Reply *Reply `json:"reply,omitempty"`
+}
+
+// Who wrote in a conversation with a client.
+const (
+	FromClient = "client"
+	FromStaff  = "staff"
+)
+
+// Reply is how a card can be answered: Modes[0] is the default; Takes — the answer takes the conversation of the queue;
+// Files — files may go with it (nil — none).
+type Reply struct {
+	Modes []Mode      `json:"modes"`
+	Takes bool        `json:"takes,omitempty"`
+	Files *FileLimits `json:"files,omitempty"`
+}
+
+// Mode is where an answer goes: client (to the client in the channel of the title), internal (a note inside the
+// conversation), chat (to the chat); an unknown one is shown by its Title.
+type Mode struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// FileLimits of the CRM for the files of an answer.
+type FileLimits struct {
+	MaxMB    int `json:"max_mb"`
+	MaxCount int `json:"max_count"`
+}
+
+// Attachment is a file uploaded for an answer (POST /uploads): its ID goes into notify.reply.
+type Attachment struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+func sameReply(a, b *Reply) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Takes != b.Takes || !slices.Equal(a.Modes, b.Modes) || (a.Files == nil) != (b.Files == nil) {
+		return false
+	}
+	return a.Files == nil || *a.Files == *b.Files
 }
 
 // CallState is ringing (it rings at this employee) or talking (they answered, until the end of the call).
@@ -46,7 +98,8 @@ type Action struct {
 // Same reports whether two cards look the same (Card has slices: not comparable with ==).
 func Same(a, b Card) bool {
 	if a.Key != b.Key || a.Kind != b.Kind || a.Title != b.Title || a.Body != b.Body || a.URL != b.URL || a.Count != b.Count ||
-		a.Sound != b.Sound || !a.At.Equal(b.At) || a.Mention != b.Mention || a.Talking() != b.Talking() || len(a.Actions) != len(b.Actions) {
+		a.Sound != b.Sound || !a.At.Equal(b.At) || a.Mention != b.Mention || a.Talking() != b.Talking() || len(a.Actions) != len(b.Actions) ||
+		a.From != b.From || !sameReply(a.Reply, b.Reply) {
 		return false
 	}
 	for i := range a.Actions {

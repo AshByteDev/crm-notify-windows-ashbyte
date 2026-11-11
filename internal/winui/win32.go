@@ -16,6 +16,7 @@ var (
 	shell32  = windows.NewLazySystemDLL("shell32.dll")
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 	wtsapi32 = windows.NewLazySystemDLL("wtsapi32.dll")
+	comdlg32 = windows.NewLazySystemDLL("comdlg32.dll")
 
 	pRegisterClassExW              = user32.NewProc("RegisterClassExW")
 	pCreateWindowExW               = user32.NewProc("CreateWindowExW")
@@ -65,6 +66,13 @@ var (
 	pGetSystemMetrics              = user32.NewProc("GetSystemMetrics")
 	pAdjustWindowRectEx            = user32.NewProc("AdjustWindowRectEx")
 	pGetSysColorBrush              = user32.NewProc("GetSysColorBrush")
+	pGetWindowLongPtrW             = user32.NewProc("GetWindowLongPtrW")
+	pSetWindowLongPtrW             = user32.NewProc("SetWindowLongPtrW")
+	pCallWindowProcW               = user32.NewProc("CallWindowProcW")
+	pSetParent                     = user32.NewProc("SetParent")
+	pGetKeyState                   = user32.NewProc("GetKeyState")
+	pGetFocus                      = user32.NewProc("GetFocus")
+	pGetWindowTextLengthW          = user32.NewProc("GetWindowTextLengthW")
 
 	pCreateSolidBrush       = gdi32.NewProc("CreateSolidBrush")
 	pCreatePen              = gdi32.NewProc("CreatePen")
@@ -82,6 +90,11 @@ var (
 	pSetDIBitsToDevice      = gdi32.NewProc("SetDIBitsToDevice")
 
 	pShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
+	pDragAcceptFiles  = shell32.NewProc("DragAcceptFiles")
+	pDragQueryFileW   = shell32.NewProc("DragQueryFileW")
+	pDragFinish       = shell32.NewProc("DragFinish")
+
+	pGetOpenFileNameW = comdlg32.NewProc("GetOpenFileNameW")
 
 	pWTSRegisterSessionNotification   = wtsapi32.NewProc("WTSRegisterSessionNotification")
 	pWTSUnRegisterSessionNotification = wtsapi32.NewProc("WTSUnRegisterSessionNotification")
@@ -157,6 +170,7 @@ const (
 	swHide          = 0
 	swShowNoActive  = 4
 	swpNoActivate   = 0x0010
+	swpNoZOrder     = 0x0004
 	swpShowWindow   = 0x0040
 	hwndTopmost     = ^uintptr(0) // -1
 	idcHand         = 32649
@@ -193,7 +207,57 @@ const (
 	psSolid        = 0
 	srcCopy        = 0x00CC0020
 	errAlreadyExis = 183
+
+	// the answer in a card
+	wmSetFocus     = 0x0007
+	wmKeyDown      = 0x0100
+	wmChar         = 0x0102
+	wmDropFiles    = 0x0233
+	wmReplyKey     = wmApp + 4    // Enter or Esc in the field of an answer (wParam: replySend, replyCancel)
+	gwlExStyle     = ^uintptr(19) // -20
+	gwlpWndProc    = ^uintptr(3)  // -4
+	esMultiline    = 0x0004
+	esAutoVScroll  = 0x0040
+	esWantReturn   = 0x1000
+	emSetLimitText = 0x00C5
+	emSetReadOnly  = 0x00CF
+	vkReturn       = 0x0D
+	vkEscape       = 0x1B
+	vkShift        = 0x10
+	dtCalcRect     = 0x0400
+	ofnExplorer    = 0x00080000
+	ofnFileMust    = 0x00001000
+	ofnPathMust    = 0x00000800
+	ofnMulti       = 0x00000200
+	ofnNoChangeDir = 0x00000008
 )
+
+// openFileName is OPENFILENAMEW (152 bytes on x64).
+type openFileName struct {
+	StructSize    uint32
+	Owner         uintptr
+	Instance      uintptr
+	Filter        *uint16
+	CustomFilter  *uint16
+	MaxCustFilter uint32
+	FilterIndex   uint32
+	File          *uint16
+	MaxFile       uint32
+	FileTitle     *uint16
+	MaxFileTitle  uint32
+	InitialDir    *uint16
+	Title         *uint16
+	Flags         uint32
+	FileOffset    uint16
+	FileExtension uint16
+	DefExt        *uint16
+	CustData      uintptr
+	Hook          uintptr
+	TemplateName  *uint16
+	Reserved      uintptr
+	Reserved2     uint32
+	FlagsEx       uint32
+}
 
 type msg struct {
 	Hwnd    uintptr

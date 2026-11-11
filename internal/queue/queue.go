@@ -83,6 +83,10 @@ type Manager struct {
 	moreSeen  int // of more, hidden by «Скрыть все»
 	dnd       bool
 	dndFrom   int64 // in DND only cards that came before it are shown
+	// pinned: an answer is being written in this card (contract 1.10): it stays on the screen next to the calls, new
+	// cards, «Скрыть все» and the CRM do not take it away. stale — the CRM has dropped it meanwhile: it goes with Unpin.
+	pinned string
+	stale  bool
 }
 
 // New creates an empty manager.
@@ -96,6 +100,7 @@ func (m *Manager) reset() {
 	m.cards, m.order, m.local = map[string]api.Card{}, map[string]int64{}, map[string]bool{}
 	m.calls, m.tests, m.dismissed = map[string]time.Time{}, map[string]time.Time{}, map[string]time.Time{}
 	m.visible, m.held, m.more, m.moreSeen, m.last = nil, "", 0, 0, 0
+	m.pinned, m.stale = "", false
 	m.endBrowse()
 }
 
@@ -120,7 +125,7 @@ func (m *Manager) counted(k string) bool {
 }
 
 // muted: the card came during «Не беспокоить» and waits for its end.
-func (m *Manager) muted(k string) bool { return m.dnd && m.order[k] > m.dndFrom }
+func (m *Manager) muted(k string) bool { return m.dnd && m.order[k] > m.dndFrom && k != m.pinned }
 
 // settle puts on the screen the calls and then the newest cards, Max at most. It runs after every change.
 func (m *Manager) settle() {
@@ -133,6 +138,12 @@ func (m *Manager) settle() {
 	slices.SortFunc(all, func(a, b string) int {
 		if ca, cb := m.isCall(a), m.isCall(b); ca != cb {
 			if ca {
+				return -1
+			}
+			return 1
+		}
+		if pa, pb := a == m.pinned, b == m.pinned; pa != pb {
+			if pa {
 				return -1
 			}
 			return 1
@@ -172,7 +183,7 @@ func (m *Manager) put(c api.Card) {
 	for len(m.cards) > MaxKept {
 		oldest, at := "", int64(0)
 		for k, o := range m.order {
-			if m.counted(k) && (oldest == "" || o < at) {
+			if m.counted(k) && k != m.pinned && (oldest == "" || o < at) {
 				oldest, at = k, o
 			}
 		}
@@ -192,6 +203,9 @@ func (m *Manager) Card(c api.Card) (sound string) {
 		return "" // «Пропустить»: a repeat of the same call does not come back
 	}
 	delete(m.dismissed, c.Key) // a new message brings a dismissed card back
+	if c.Key == m.pinned {
+		m.stale = false
+	}
 	old, had := m.cards[c.Key]
 	if c.Kind == KindCall {
 		m.markCall(c)
@@ -229,6 +243,10 @@ func (m *Manager) Clear(keys ...string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, k := range keys {
+		if k == m.pinned {
+			m.stale = true
+			continue
+		}
 		m.drop(k)
 	}
 	m.settle()
@@ -301,8 +319,15 @@ func (m *Manager) Sync(s api.Snapshot) {
 	}
 	for k := range m.cards {
 		if !present[k] && !m.local[k] && (!m.isCall(k) || m.talking(k)) {
+			if k == m.pinned {
+				m.stale = true
+				continue
+			}
 			m.drop(k)
 		}
+	}
+	if present[m.pinned] {
+		m.stale = false
 	}
 	for k := range m.dismissed {
 		if !present[k] {
@@ -336,6 +361,9 @@ func (m *Manager) Dismiss(key string) {
 }
 
 func (m *Manager) dismiss(key string) {
+	if key == m.pinned {
+		m.pinned, m.stale = "", false
+	}
 	if c, ok := m.cards[key]; ok {
 		m.dismissed[key] = c.At
 	}
@@ -348,7 +376,7 @@ func (m *Manager) HideAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k := range m.cards {
-		if m.counted(k) {
+		if m.counted(k) && k != m.pinned {
 			m.dismiss(k)
 		}
 	}
@@ -372,18 +400,19 @@ func (m *Manager) SetDND(on bool) {
 func (m *Manager) page() int {
 	n := Max
 	for _, k := range m.visible {
-		if m.isCall(k) {
+		if m.isCall(k) || k == m.pinned {
 			n--
 		}
 	}
 	return max(n, 0)
 }
 
-// list is what the strip counts, the newest first; with a time — only the cards not newer than it.
+// list is what the strip counts, the newest first, without the card of an answer; with a time — only the cards not
+// newer than it.
 func (m *Manager) list(before time.Time) []string {
 	var out []string
 	for k, c := range m.cards {
-		if m.counted(k) && (before.IsZero() || !c.At.After(before)) {
+		if m.counted(k) && k != m.pinned && (before.IsZero() || !c.At.After(before)) {
 			out = append(out, k)
 		}
 	}
@@ -435,6 +464,35 @@ func (m *Manager) Scroll(by int) {
 	}
 }
 
+// Pin keeps a card on the screen while an answer is written in it; Unpin lets it go (a card the CRM has dropped
+// meanwhile goes then). One at a time: a new Pin lets the old one go.
+func (m *Manager) Pin(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.cards[key]; !ok {
+		return
+	}
+	m.unpin()
+	m.pinned = key
+	m.settle()
+}
+
+// Unpin: the answer is sent or given up.
+func (m *Manager) Unpin() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.unpin()
+	m.settle()
+}
+
+func (m *Manager) unpin() {
+	k, stale := m.pinned, m.stale
+	m.pinned, m.stale = "", false
+	if stale {
+		m.drop(k)
+	}
+}
+
 // Get returns a card by key.
 func (m *Manager) Get(key string) (api.Card, bool) {
 	m.mu.Lock()
@@ -463,6 +521,11 @@ func (m *Manager) View() View {
 			if m.isCall(k) {
 				v.Visible = append(v.Visible, m.cards[k])
 				v.Calls++
+			}
+		}
+		for _, k := range m.visible {
+			if k == m.pinned {
+				v.Visible = append(v.Visible, m.cards[k])
 			}
 		}
 		for _, k := range list[m.offset:min(m.offset+m.page(), len(list))] {

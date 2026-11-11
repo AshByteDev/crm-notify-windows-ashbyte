@@ -2,7 +2,9 @@ package winui
 
 import (
 	"fmt"
+	"strings"
 	"time"
+	u16 "unicode/utf16"
 
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
@@ -169,4 +171,139 @@ func talkButtons(c api.Card) (first, second int, menu []int) {
 		menu = append(menu, i)
 	}
 	return first, second, menu
+}
+
+// The answer in a card (contract 1.10 §5.8), in logical pixels of a card of the width cardW. Closed: a field «Ответить…»
+// under the message. Open: the switch of the modes (more than one), the text, the files, the words of the state, the
+// buttons.
+const (
+	cardW        = 360 // the width of a card
+	replyClosedH = 116 // a card with the field «Ответить…»
+	replyEditH   = 60  // three lines of text
+	replyFileH   = 22
+)
+
+type replyRects struct {
+	Box                  rect // closed: the field «Ответить…»; open: the frame of the text
+	Modes                []rect
+	Files                []rect // a row each; its ✕ is fileX
+	Status               rect
+	Attach, Cancel, Send rect
+	H                    int32
+}
+
+// replyOpen: the answer of this card is being written.
+func replyOpen(c api.Card, d *app.Draft) bool { return c.Reply != nil && d != nil && d.Key == c.Key }
+
+func replyLayout(c api.Card, d *app.Draft) replyRects {
+	const left, right = 14, cardW - 14
+	var r replyRects
+	if !replyOpen(c, d) {
+		r.Box, r.H = rect{left, 78, right, 104}, replyClosedH
+		return r
+	}
+	y := int32(76)
+	if n := int32(len(c.Reply.Modes)); n > 1 {
+		const g = 6
+		w := (right - left - g*(n-1)) / n
+		for i := range n {
+			x := left + i*(w+g)
+			r.Modes = append(r.Modes, rect{x, y, x + w, y + 26})
+		}
+		y += 32
+	}
+	r.Box = rect{left, y, right, y + replyEditH}
+	y += replyEditH + 6
+	for range d.Files {
+		r.Files = append(r.Files, rect{left, y, right, y + replyFileH})
+		y += replyFileH
+	}
+	if len(d.Files) > 0 {
+		y += 4
+	}
+	if d.Status != "" {
+		r.Status = rect{left, y, right, y + 18}
+		y += 22
+	}
+	send := int32(104)
+	if c.Reply.Takes {
+		send = 150
+	}
+	r.Send = rect{right - send, y, right, y + 28}
+	r.Cancel = rect{r.Send.Left - 6 - 76, y, r.Send.Left - 6, y + 28}
+	if c.Reply.Files != nil {
+		r.Attach = rect{left, y, left + 84, y + 28}
+	}
+	r.H = y + 28 + 12
+	return r
+}
+
+// fileX is the ✕ of a row of a file.
+func fileX(row rect) rect { return rect{row.Right - 22, row.Top, row.Right, row.Bottom} }
+
+// replyHint is the field of a closed answer.
+func replyHint(c api.Card) string {
+	if c.Reply.Takes {
+		return "Ответить и взять беседу…"
+	}
+	if len(c.Reply.Modes) == 1 && c.Reply.Modes[0].Title != "" {
+		return c.Reply.Modes[0].Title + "…"
+	}
+	return "Ответить…"
+}
+
+// sendLabel is the main button of an open answer.
+func sendLabel(c api.Card, d *app.Draft) string {
+	switch {
+	case d.Busy:
+		return "Отправляю…"
+	case c.Reply.Takes:
+		return "Взять и отправить"
+	}
+	return "Отправить"
+}
+
+// fileText is a row of a file: the name, the size and what happens to it.
+func fileText(f app.File) string {
+	s := f.Name + " · " + size(f.Size)
+	switch {
+	case f.Uploading:
+		s += " · загружаю…"
+	case f.Error != "":
+		s += " · " + f.Error
+	}
+	return s
+}
+
+func size(n int64) string {
+	switch {
+	case n < 1<<10:
+		return fmt.Sprintf("%d Б", n)
+	case n < 1<<20:
+		return fmt.Sprintf("%d КБ", (n+1<<9)>>10)
+	}
+	return strings.Replace(fmt.Sprintf("%.1f МБ", float64(n)/(1<<20)), ".", ",", 1)
+}
+
+// chosen reads the answer of the dialog: one full path, or the folder and the names, each ending with a zero.
+func chosen(buf []uint16) []string {
+	var parts []string
+	for start, i := 0, 0; i < len(buf); i++ {
+		if buf[i] != 0 {
+			continue
+		}
+		if i == start {
+			break
+		}
+		parts = append(parts, string(u16.Decode(buf[start:i])))
+		start = i + 1
+	}
+	if len(parts) <= 1 {
+		return parts
+	}
+	out := make([]string, 0, len(parts)-1)
+	for _, n := range parts[1:] {
+		out = append(out, strings.TrimRight(parts[0], `\`)+`\`+n)
+	}
+	return out
 }

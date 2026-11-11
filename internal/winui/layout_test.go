@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	u16 "unicode/utf16"
 
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
@@ -125,5 +126,50 @@ func TestTalkButtons(t *testing.T) {
 		if f != tc.first || s != tc.second || fmt.Sprint(append([]int{}, m...)) != tc.menu {
 			t.Errorf("%v: %d %d %v", tc.card.Actions, f, s, m)
 		}
+	}
+}
+
+func TestReplyLayout(t *testing.T) {
+	c := api.Card{Key: "chat-1", Reply: &api.Reply{Modes: []api.Mode{{ID: "client"}, {ID: "internal"}}, Files: &api.FileLimits{}}}
+	if r := replyLayout(c, nil); r.H != replyClosedH || r.Box.Top < 70 {
+		t.Fatalf("closed %+v", r)
+	}
+	d := &app.Draft{Key: "chat-1", Files: []app.File{{Name: "a"}, {Name: "b"}}, Status: "Отправляю…"}
+	r := replyLayout(c, d)
+	if len(r.Modes) != 2 || r.Modes[0].Right >= r.Modes[1].Left || len(r.Files) != 2 || r.Status.Bottom == 0 ||
+		r.Attach.Right == 0 || r.Cancel.Right > r.Send.Left || r.Send.Right != cardW-14 || r.H != r.Send.Bottom+12 {
+		t.Fatalf("open %+v", r)
+	}
+	for _, x := range append(r.Files, r.Status, r.Box) {
+		if x.Top < r.Modes[0].Bottom || x.Bottom > r.Send.Top {
+			t.Fatalf("overlap %+v in %+v", x, r)
+		}
+	}
+	one := api.Card{Key: "chat-2", Reply: &api.Reply{Modes: []api.Mode{{ID: "chat", Title: "Ответ Марии"}}, Takes: true}}
+	r = replyLayout(one, &app.Draft{Key: "chat-2"})
+	if len(r.Modes) != 0 || r.Attach.Right != 0 || r.Send.Right-r.Send.Left != 150 {
+		t.Fatalf("one mode %+v", r)
+	}
+	if replyHint(one) != "Ответить и взять беседу…" || sendLabel(one, &app.Draft{}) != "Взять и отправить" {
+		t.Fatal("takes words")
+	}
+	if got := size(1536 << 10); got != "1,5 МБ" {
+		t.Fatal(got)
+	}
+	if got := fileText(app.File{Name: "a.pdf", Size: 2048, Uploading: true}); got != "a.pdf · 2 КБ · загружаю…" {
+		t.Fatal(got)
+	}
+}
+
+func TestChosen(t *testing.T) {
+	enc := func(s string) []uint16 { return append(u16.Encode([]rune(s)), make([]uint16, 8)...) }
+	if got := chosen(enc("C:\\Док\\счёт.pdf\x00")); len(got) != 1 || got[0] != `C:\Док\счёт.pdf` {
+		t.Fatalf("%q", got)
+	}
+	if got := chosen(enc("C:\\\x00a.pdf\x00b.pdf\x00")); len(got) != 2 || got[0] != `C:\a.pdf` || got[1] != `C:\b.pdf` {
+		t.Fatalf("%q", got)
+	}
+	if got := chosen(make([]uint16, 4)); len(got) != 0 {
+		t.Fatalf("%q", got)
 	}
 }
