@@ -6,7 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -64,6 +68,11 @@ func (c *Client) do(ctx context.Context, method, path, token string, in, out any
 		return err
 	}
 	defer res.Body.Close()
+	return answer(res, out)
+}
+
+// answer reads a reply of the API: the error of the CRM, or the body into out.
+func answer(res *http.Response, out any) error {
 	raw, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode >= 300 {
 		e := &Error{Status: res.StatusCode}
@@ -100,6 +109,55 @@ func (c *Client) Refresh(ctx context.Context, refresh string) (Tokens, error) {
 func (c *Client) Me(ctx context.Context, access string) (Me, error) {
 	var m Me
 	return m, c.do(ctx, "GET", "/me", access, nil, &m)
+}
+
+// Upload sends a file of an answer (POST /uploads, contract 1.10 §3.4): the body is streamed from r, not read into
+// memory first. ctx bounds it: a big file over a slow line takes longer than the timeout of the other calls.
+func (c *Client) Upload(ctx context.Context, access, name string, r io.Reader) (Attachment, error) {
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	go func() {
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, quoteName(name)))
+		kind := mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
+		if kind == "" {
+			kind = "application/octet-stream"
+		}
+		h.Set("Content-Type", kind)
+		part, err := mw.CreatePart(h)
+		if err == nil {
+			_, err = io.Copy(part, r)
+		}
+		if err == nil {
+			err = mw.Close()
+		}
+		pw.CloseWithError(err)
+	}()
+	req, err := http.NewRequestWithContext(ctx, "POST", c.Base+"/api/v1/uploads", pr)
+	if err != nil {
+		pr.Close()
+		return Attachment{}, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if c.UserAgent != "" {
+		req.Header.Set("User-Agent", c.UserAgent)
+	}
+	req.Header.Set("Authorization", "Bearer "+access)
+	hc := *c.HTTP
+	hc.Timeout = 0 // ctx bounds it
+	res, err := hc.Do(req)
+	pr.Close()
+	if err != nil {
+		return Attachment{}, err
+	}
+	defer res.Body.Close()
+	var a Attachment
+	return a, answer(res, &a)
+}
+
+// quoteName keeps a file name inside the quotes of Content-Disposition.
+func quoteName(s string) string {
+	return strings.NewReplacer("\\", "\\\\", `"`, "\\\"", "\r", "", "\n", "").Replace(s)
 }
 
 // Logout ends the session of the app in the CRM.

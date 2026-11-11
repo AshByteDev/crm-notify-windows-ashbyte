@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,7 +37,7 @@ const (
 const activeWithin = time.Minute
 
 // Contract is the version of docs/NOTIFY_CONTRACT.md the app speaks; a CRM with another major version needs another app.
-const Contract = "1.8"
+const Contract = "1.10"
 
 // Places of the cards on the screen (the setting «Где показывать уведомления»).
 const (
@@ -134,6 +135,8 @@ type App struct {
 	cancelLogin context.CancelFunc
 	// unsent: cards marked «Прочитано» when the CRM could not be reached; sent again after the next snapshot.
 	unsent map[string]bool
+	// draft is the answer being written in a card (reply.go); nil — none.
+	draft *draft
 }
 
 // View is what the tray and the cards show.
@@ -154,6 +157,7 @@ type View struct {
 	Test          string // the result of the last check in the settings
 	Version       string
 	Server        string
+	Reply         *Draft // the answer being written in a card
 }
 
 func (a *App) userAgent() string { return "AshCRM-Notify/" + a.Version + " (Windows)" }
@@ -228,6 +232,11 @@ func (a *App) View() View {
 		FixedServer: a.Shared && a.Settings != nil && a.Settings.Server != ""}
 	if a.Q != nil {
 		v.Queue = a.Q.View()
+	}
+	if a.draft != nil {
+		d := a.draft.Draft
+		d.Files = slices.Clone(d.Files)
+		v.Reply = &d
 	}
 	if a.P.Autostart != nil {
 		v.Autostart = a.P.Autostart()
@@ -388,7 +397,7 @@ func (a *App) signedOut(why string) {
 		a.stop()
 		a.stop = nil
 	}
-	a.stream, a.secret, a.access, a.user, a.unsent = nil, platform.Secret{}, "", "", nil
+	a.stream, a.secret, a.access, a.user, a.unsent, a.draft = nil, platform.Secret{}, "", "", nil, nil
 	a.state, a.lastError = SignedOut, why
 	a.mu.Unlock()
 	platform.DeleteSecret(a.Dir)
@@ -475,6 +484,10 @@ func (a *App) HideAll() {
 
 // Read is «Прочитано»: the card goes at once, the CRM reads the chat (every device drops it).
 func (a *App) Read(ctx context.Context, key string) {
+	if a.replyBusy(key) {
+		return
+	}
+	a.dropReply(key)
 	a.Q.Dismiss(key)
 	a.changed()
 	if key == UpdateKey || key == TestKey {
@@ -583,6 +596,10 @@ func (a *App) readNext(ctx context.Context) {
 
 // Close (×) removes the card here only; a newer message brings it back.
 func (a *App) Close(key string) {
+	if a.replyBusy(key) {
+		return
+	}
+	a.dropReply(key)
 	a.Q.Dismiss(key)
 	a.changed()
 }
@@ -690,6 +707,7 @@ type handler struct{ a *App }
 func (h handler) Sync(s api.Snapshot) {
 	h.a.Q.Sync(s)
 	h.a.sendUnsent()
+	h.a.trySend() // an answer the lost connection held
 	h.a.readNext(context.Background())
 	h.a.changed()
 }

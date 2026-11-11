@@ -455,6 +455,41 @@ func (s *Stream) ReadAll(ctx context.Context, before time.Time) error {
 	return nil
 }
 
+// Refusal is an answer of the CRM with an error: Message is for the person, as the CRM worded it. It is ErrRefused.
+type Refusal struct {
+	Code    string // validation | forbidden | conflict | …
+	Message string
+}
+
+func (r *Refusal) Error() string        { return fmt.Sprintf("%s: %s", ErrRefused, r.Message) }
+func (r *Refusal) Is(target error) bool { return target == ErrRefused }
+
+// ReplyRequest is an answer from a card (contract 1.10 §5.8). ClientID makes a repeat safe: the CRM sends it once.
+// Text is never logged.
+type ReplyRequest struct {
+	Key      string   `json:"key"`
+	Mode     string   `json:"mode"`
+	Text     string   `json:"text"`
+	Files    []string `json:"files"`
+	ClientID string   `json:"client_id"`
+}
+
+// Reply sends an answer. A *Refusal: nothing was sent; another error: it may or may not have arrived — repeat the same
+// request.
+func (s *Stream) Reply(ctx context.Context, r ReplyRequest) error {
+	if r.Files == nil {
+		r.Files = []string{}
+	}
+	f, err := s.request(ctx, "notify.reply", r)
+	if err != nil {
+		return err
+	}
+	if f.Error != nil {
+		return &Refusal{Code: f.Error.Code, Message: f.Error.Message}
+	}
+	return nil
+}
+
 // Read sends «Прочитано» for a card.
 func (s *Stream) Read(ctx context.Context, key string) error {
 	f, err := s.request(ctx, "notify.read", map[string]string{"key": key})
