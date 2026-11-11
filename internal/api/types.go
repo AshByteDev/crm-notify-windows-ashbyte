@@ -26,6 +26,15 @@ type Card struct {
 	From string `json:"from,omitempty"`
 	// Reply: the card can be answered from here now (contract 1.10 §5.8); nil — no «Ответить».
 	Reply *Reply `json:"reply,omitempty"`
+	// Sticker: the last message is a sticker of the sets of the company (contract 1.11); no Hash — no picture, Body.
+	Sticker *Sticker `json:"sticker,omitempty"`
+}
+
+// Sticker is the picture of a sticker: Code "<pack>/<id>", Hash the SHA-256 of the PNG at URL (a path of the portal).
+type Sticker struct {
+	Code string `json:"code"`
+	Hash string `json:"hash,omitempty"`
+	URL  string `json:"url,omitempty"`
 }
 
 // Who wrote in a conversation with a client.
@@ -72,6 +81,13 @@ func sameReply(a, b *Reply) bool {
 	return a.Files == nil || *a.Files == *b.Files
 }
 
+func sameSticker(a, b *Sticker) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 // CallState is ringing (it rings at this employee) or talking (they answered, until the end of the call).
 type CallState struct {
 	State string `json:"state"`
@@ -99,7 +115,7 @@ type Action struct {
 func Same(a, b Card) bool {
 	if a.Key != b.Key || a.Kind != b.Kind || a.Title != b.Title || a.Body != b.Body || a.URL != b.URL || a.Count != b.Count ||
 		a.Sound != b.Sound || !a.At.Equal(b.At) || a.Mention != b.Mention || a.Talking() != b.Talking() || len(a.Actions) != len(b.Actions) ||
-		a.From != b.From || !sameReply(a.Reply, b.Reply) {
+		a.From != b.From || !sameReply(a.Reply, b.Reply) || !sameSticker(a.Sticker, b.Sticker) {
 		return false
 	}
 	for i := range a.Actions {

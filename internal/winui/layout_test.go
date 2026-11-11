@@ -131,11 +131,11 @@ func TestTalkButtons(t *testing.T) {
 
 func TestReplyLayout(t *testing.T) {
 	c := api.Card{Key: "chat-1", Reply: &api.Reply{Modes: []api.Mode{{ID: "client"}, {ID: "internal"}}, Files: &api.FileLimits{}}}
-	if r := replyLayout(c, nil); r.H != replyClosedH || r.Box.Top < 70 {
+	if r := replyLayout(c, nil, 0); r.H != replyClosedH || r.Box.Top < 70 {
 		t.Fatalf("closed %+v", r)
 	}
 	d := &app.Draft{Key: "chat-1", Files: []app.File{{Name: "a"}, {Name: "b"}}, Status: "Отправляю…"}
-	r := replyLayout(c, d)
+	r := replyLayout(c, d, 0)
 	if len(r.Modes) != 2 || r.Modes[0].Right >= r.Modes[1].Left || len(r.Files) != 2 || r.Status.Bottom == 0 ||
 		r.Attach.Right == 0 || r.Cancel.Right > r.Send.Left || r.Send.Right != cardW-14 || r.H != r.Send.Bottom+12 {
 		t.Fatalf("open %+v", r)
@@ -146,7 +146,10 @@ func TestReplyLayout(t *testing.T) {
 		}
 	}
 	one := api.Card{Key: "chat-2", Reply: &api.Reply{Modes: []api.Mode{{ID: "chat", Title: "Ответ Марии"}}, Takes: true}}
-	r = replyLayout(one, &app.Draft{Key: "chat-2"})
+	if s := replyLayout(c, nil, stickerShift); s.H != replyClosedH+stickerShift || s.Box.Top != replyLayout(c, nil, 0).Box.Top+stickerShift {
+		t.Errorf("with a sticker %+v", s)
+	}
+	r = replyLayout(one, &app.Draft{Key: "chat-2"}, 0)
 	if len(r.Modes) != 0 || r.Attach.Right != 0 || r.Send.Right-r.Send.Left != 150 {
 		t.Fatalf("one mode %+v", r)
 	}

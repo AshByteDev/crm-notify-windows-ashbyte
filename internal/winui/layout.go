@@ -195,14 +195,15 @@ type replyRects struct {
 // replyOpen: the answer of this card is being written.
 func replyOpen(c api.Card, d *app.Draft) bool { return c.Reply != nil && d != nil && d.Key == c.Key }
 
-func replyLayout(c api.Card, d *app.Draft) replyRects {
+// replyLayout: shift — the card shows a sticker, all goes lower (shiftFor).
+func replyLayout(c api.Card, d *app.Draft, shift int32) replyRects {
 	const left, right = 14, cardW - 14
 	var r replyRects
 	if !replyOpen(c, d) {
-		r.Box, r.H = rect{left, 78, right, 104}, replyClosedH
+		r.Box, r.H = rect{left, 78 + shift, right, 104 + shift}, replyClosedH+shift
 		return r
 	}
-	y := int32(76)
+	y := 76 + shift
 	if n := int32(len(c.Reply.Modes)); n > 1 {
 		const g = 6
 		w := (right - left - g*(n-1)) / n

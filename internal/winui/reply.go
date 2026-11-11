@@ -59,7 +59,7 @@ func (u *UI) replyHit(s *slot, x, y int32) int {
 		return hitNone
 	}
 	d := u.draft
-	l := replyLayout(s.card, d)
+	l := replyLayout(s.card, d, shiftFor(s.pic != nil))
 	if !replyOpen(s.card, d) {
 		if in(u.sr(l.Box), x, y) {
 			return hitReplyBox
@@ -200,7 +200,7 @@ func (u *UI) syncReply() {
 			pSetFocus.Call(u.rep.edit)
 		}
 	}
-	box := u.sr(replyLayout(host.card, d).Box)
+	box := u.sr(replyLayout(host.card, d, shiftFor(host.pic != nil)).Box)
 	in := rect{box.Left + u.pi(8), box.Top + u.pi(6), box.Right - u.pi(8), box.Bottom - u.pi(6)}
 	pSendMessageW.Call(u.rep.edit, wmSetFont, u.font(13, false), 0)
 	pSetWindowPos.Call(u.rep.edit, 0, uintptr(in.Left), uintptr(in.Top), uintptr(in.Right-in.Left), uintptr(in.Bottom-in.Top),
@@ -333,7 +333,7 @@ func (u *UI) badges(p painter, c api.Card, left int32) int32 {
 func (u *UI) drawReply(p painter, s *slot) {
 	d := u.draft
 	c := s.card
-	l := replyLayout(c, d)
+	l := replyLayout(c, d, shiftFor(s.pic != nil))
 	if !replyOpen(c, d) {
 		box, border := u.sr(l.Box), colBorder
 		if s.hover == hitReplyBox {

@@ -111,6 +111,35 @@ func (c *Client) Me(ctx context.Context, access string) (Me, error) {
 	return m, c.do(ctx, "GET", "/me", access, nil, &m)
 }
 
+// Sticker gets the picture of a sticker of a card (GET <portal> + path, contract 1.11 §3.4): a PNG of at most limit
+// bytes; a bigger answer is an error.
+func (c *Client) Sticker(ctx context.Context, access, path string, limit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.Base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.UserAgent != "" {
+		req.Header.Set("User-Agent", c.UserAgent)
+	}
+	req.Header.Set("Authorization", "Bearer "+access)
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, answer(res, nil)
+	}
+	raw, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("the picture is bigger than %d bytes", limit)
+	}
+	return raw, nil
+}
+
 // Upload sends a file of an answer (POST /uploads, contract 1.10 §3.4): the body is streamed from r, not read into
 // memory first. ctx bounds it: a big file over a slow line takes longer than the timeout of the other calls.
 func (c *Client) Upload(ctx context.Context, access, name string, r io.Reader) (Attachment, error) {
