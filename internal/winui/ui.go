@@ -8,6 +8,7 @@ package winui
 import (
 	"context"
 	"fmt"
+	"image"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -88,6 +89,7 @@ type slot struct {
 	text  string // the strip / the error of the sign-in card
 	hover int
 	shown bool
+	pic   image.Image // the sticker of the card (contract 1.11); nil — the text
 }
 
 // UI owns every window; all of it runs on one locked OS thread (the Win32 rule).
@@ -107,6 +109,7 @@ type UI struct {
 	byHwnd    map[uintptr]*slot
 	fonts     map[string]uintptr
 	dots      map[string][]byte // the pixels of the circles by colour, sign, hover and size
+	pics      map[any][]byte    // the pixels of the stickers by picture and size
 	signinOK  bool              // the person closed the «sign in» card
 
 	portal       portal
@@ -521,6 +524,7 @@ func (u *UI) refresh() {
 	type want struct {
 		kind, text string
 		card       api.Card
+		pic        image.Image
 	}
 	var list []want
 	if t := stripText(v.Queue); t != "" {
@@ -540,7 +544,7 @@ func (u *UI) refresh() {
 		u.signinOK = false
 	}
 	for _, c := range v.Queue.Visible {
-		list = append(list, want{kind: "card", card: c})
+		list = append(list, want{kind: "card", card: c, pic: u.A.Sticker(c)})
 	}
 
 	var wa rect
@@ -555,9 +559,9 @@ func (u *UI) refresh() {
 		case w.card.Talking():
 			heights[i] = u.pi(talkH)
 		case w.card.Reply != nil:
-			heights[i] = u.pi(int(replyLayout(w.card, v.Reply).H))
+			heights[i] = u.pi(int(replyLayout(w.card, v.Reply, shiftFor(w.pic != nil)).H))
 		default:
-			heights[i] = u.pi(cardH)
+			heights[i] = u.pi(cardH + int(shiftFor(w.pic != nil)))
 		}
 	}
 	places := stack(v.Position, wa, u.pi(cardW), heights, u.pi(margin), u.pi(gap))
@@ -570,8 +574,8 @@ func (u *UI) refresh() {
 			continue
 		}
 		w, h, at := list[i], heights[i], places[i]
-		changed := rescaled || w.card.Reply != nil || s.kind != w.kind || s.text != w.text || !api.Same(s.card, w.card)
-		s.kind, s.text, s.card = w.kind, w.text, w.card
+		changed := rescaled || w.card.Reply != nil || s.kind != w.kind || s.text != w.text || s.pic != w.pic || !api.Same(s.card, w.card)
+		s.kind, s.text, s.card, s.pic = w.kind, w.text, w.card, w.pic
 		pSetWindowPos.Call(s.hwnd, hwndTopmost, uintptr(at.X), uintptr(at.Y), uintptr(u.pi(cardW)), uintptr(h), swpNoActivate|swpShowWindow)
 		rgn, _, _ := pCreateRoundRectRgn.Call(0, 0, uintptr(u.pi(cardW)+1), uintptr(h+1), uintptr(u.pi(radius)), uintptr(u.pi(radius)))
 		pSetWindowRgn.Call(s.hwnd, rgn, 1)
@@ -1052,6 +1056,13 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 	if s.card.Talking() { // «Разговор»: the number on one line, the buttons in words below
 		p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(56)}, u.font(13, false), colBody, dtSingleLine|dtVCenter|dtEndEllipsis)
 		u.drawTalkButtons(p, s)
+	} else if s.pic != nil { // the sticker in place of the text; «Иван: Стикер» of a group stays next to it
+		size := u.pi(stickerPx)
+		p.pixels(u.stickerPixels(s.pic, size), u.pi(14), u.pi(stickerTop), size, size)
+		if s.card.Body != stickerBody {
+			x := u.pi(14) + size + u.pi(12)
+			p.text(s.card.Body, rect{x, u.pi(stickerTop), w - u.pi(12), u.pi(stickerTop) + size}, u.font(13, false), colMuted, dtWordBreak|dtEndEllipsis|dtEditControl)
+		}
 	} else {
 		p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(70)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
 	}
@@ -1121,6 +1132,24 @@ func (u *UI) circle(p painter, s *slot, r rect, sign string, hit int, st dotStyl
 		u.dots[key] = pix
 	}
 	p.pixels(pix, r.Left+(r.Right-r.Left-size)/2, r.Top+(r.Bottom-r.Top-size)/2, size, size)
+}
+
+// stickerPixels is a sticker fitted to size, kept for the next paints.
+func (u *UI) stickerPixels(img image.Image, size int32) []byte {
+	type key struct {
+		img  image.Image
+		size int32
+	}
+	k := key{img, size}
+	if pix, ok := u.pics[k]; ok {
+		return pix
+	}
+	if u.pics == nil || len(u.pics) > 64 {
+		u.pics = map[any][]byte{}
+	}
+	pix := bgra(fitted(img, int(size)))
+	u.pics[k] = pix
+	return pix
 }
 
 // pixels puts a picture drawn by the app (bgra) at x, y.

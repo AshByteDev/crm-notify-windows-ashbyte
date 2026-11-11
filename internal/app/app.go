@@ -20,6 +20,7 @@ import (
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/managed"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/platform"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/queue"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/stickers"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/stream"
 )
 
@@ -37,7 +38,7 @@ const (
 const activeWithin = time.Minute
 
 // Contract is the version of docs/NOTIFY_CONTRACT.md the app speaks; a CRM with another major version needs another app.
-const Contract = "1.10"
+const Contract = "1.11"
 
 // Places of the cards on the screen (the setting «Где показывать уведомления»).
 const (
@@ -105,9 +106,12 @@ type App struct {
 	Changed func()
 	// Quit closes the app (after an update the new copy starts).
 	Quit func()
+	// StickerDir is the folder of the pictures of the stickers shared by the computer; "" — in memory only.
+	StickerDir string
 
-	Q   *queue.Manager
-	api *api.Client
+	Q        *queue.Manager
+	api      *api.Client
+	stickers *stickers.Store
 
 	mu        sync.Mutex
 	cfg       platform.Config
@@ -183,6 +187,7 @@ func (a *App) Start(ctx context.Context) {
 		a.connect(ctx)
 	}
 	go a.follow(ctx)
+	go a.pruneStickers()
 	a.changed()
 }
 

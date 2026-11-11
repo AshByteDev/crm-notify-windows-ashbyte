@@ -13,6 +13,7 @@ import (
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/managed"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/platform"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/stickers"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/winui"
 )
 
@@ -45,6 +46,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	settle(a)
+	a.StickerDir = stickers.Prepare(stickers.SharedDir())
 	u := &winui.UI{A: a, Ctx: ctx}
 	a.Changed, a.Quit = u.Notify, u.Quit
 	a.Start(ctx)
@@ -102,6 +104,8 @@ func fetchUpdate() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
+	// the folder of the stickers is created by SYSTEM, so no person owns it; the people add files there
+	stickers.Prepare(stickers.SharedDir())
 	a.Load()
 	if err := a.Fetch(ctx); err != nil {
 		a.Log.Warn("fetch update", "err", err)
