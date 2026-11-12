@@ -10,6 +10,7 @@ import (
 
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/api"
 	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/app"
+	"github.com/AshByteDev/crm-notify-windows-ashbyte/internal/queue"
 )
 
 // The answer in a card (contract 1.10 §5.8). The text is an EDIT inside the card that shows the answer; the rest is
@@ -46,7 +47,9 @@ var (
 	colRed    = rgb(0xD9, 0x3B, 0x30)
 	colViolet = rgb(0x8E, 0x5C, 0xD9) // a note inside the conversation
 	colTake   = rgb(0xFF, 0x6B, 0x00) // «Новая беседа»: the answer takes it
-	colField  = rgb(0xF5, 0xF7, 0xFA)
+	// colDelivery: «Доставка» (contract 1.12); a card to be noticed is red
+	colDelivery = rgb(0x0E, 0x8F, 0x86)
+	colField    = rgb(0xF5, 0xF7, 0xFA)
 )
 
 // sr scales a rect of logical pixels.
@@ -317,6 +320,13 @@ func (u *UI) badges(p painter, c api.Card, left int32) int32 {
 	}
 	if c.From == api.FromStaff {
 		list = append(list, badge{"внутри", colViolet})
+	}
+	if c.Kind == queue.KindDelivery {
+		col := colDelivery
+		if c.Alert {
+			col = colRed
+		}
+		list = append(list, badge{"Доставка", col})
 	}
 	f := u.font(11, true)
 	for _, b := range list {

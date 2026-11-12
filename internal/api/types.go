@@ -14,7 +14,7 @@ type Card struct {
 	Body    string    `json:"body"`
 	URL     string    `json:"url"` // a path in the CRM ("/team/<chat>")
 	Count   int       `json:"count"`
-	Sound   string    `json:"sound"` // client | other
+	Sound   string    `json:"sound"` // client | delivery | other; unknown — as other
 	At      time.Time `json:"at"`
 	Mention bool      `json:"mention"`
 	// Call: the state of a call of the PBX (kind call, contract 1.4 §5.3); Actions: the buttons of the card as the CRM
@@ -28,6 +28,9 @@ type Card struct {
 	Reply *Reply `json:"reply,omitempty"`
 	// Sticker: the last message is a sticker of the sets of the company (contract 1.11); no Hash — no picture, Body.
 	Sticker *Sticker `json:"sticker,omitempty"`
+	// Alert: a card to be noticed (contract 1.12: a ping of the dispatcher, «Не удалось», «Срок прошёл», an urgent
+	// request): red, louder, not pushed off the screen by ordinary cards.
+	Alert bool `json:"alert,omitempty"`
 }
 
 // Sticker is the picture of a sticker: Code "<pack>/<id>", Hash the SHA-256 of the PNG at URL (a path of the portal).
@@ -115,7 +118,7 @@ type Action struct {
 func Same(a, b Card) bool {
 	if a.Key != b.Key || a.Kind != b.Kind || a.Title != b.Title || a.Body != b.Body || a.URL != b.URL || a.Count != b.Count ||
 		a.Sound != b.Sound || !a.At.Equal(b.At) || a.Mention != b.Mention || a.Talking() != b.Talking() || len(a.Actions) != len(b.Actions) ||
-		a.From != b.From || !sameReply(a.Reply, b.Reply) || !sameSticker(a.Sticker, b.Sticker) {
+		a.From != b.From || !sameReply(a.Reply, b.Reply) || !sameSticker(a.Sticker, b.Sticker) || a.Alert != b.Alert {
 		return false
 	}
 	for i := range a.Actions {
@@ -134,8 +137,11 @@ type Snapshot struct {
 
 // Sound classes.
 const (
-	SoundClient = "client"
-	SoundOther  = "other"
+	SoundClient   = "client"
+	SoundDelivery = "delivery" // contract 1.12: everything of «Доставка»
+	SoundOther    = "other"
+	// SoundAlert is the sound of the app for a card with Alert: the sound of the delivery, louder and twice.
+	SoundAlert = "alert"
 )
 
 // Tokens of the desktop session.

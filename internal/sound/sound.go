@@ -1,11 +1,13 @@
-// Package sound synthesizes the two sounds of the app (no files to ship): «client» — a client wrote or a conversation
-// came (two rising notes), «other» — everything else (one soft note).
+// Package sound synthesizes the sounds of the app (no files to ship): «client» — a client wrote or a conversation came
+// (two rising notes), «delivery» — «Доставка» (three quick notes, contract 1.12), «alert» — a card of the delivery to be
+// noticed (the same three, louder and twice), «other» — everything else (one soft note).
 package sound
 
 import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"slices"
 	"sync"
 )
 
@@ -25,8 +27,10 @@ var (
 func WAV(class string) []byte {
 	once.Do(func() {
 		cache = map[string][]byte{
-			"client": build([]note{{880, 130}, {1318.5, 220}}, 0.55),
-			"other":  build([]note{{659.3, 200}}, 0.4),
+			"client":   build([]note{{880, 130}, {1318.5, 220}}, 0.55),
+			"other":    build([]note{{659.3, 200}}, 0.4),
+			"delivery": build(delivery, 0.55),
+			"alert":    build(append(append(slices.Clone(delivery), note{0, 140}), delivery...), 0.9),
 		}
 	})
 	if w, ok := cache[class]; ok {
@@ -35,12 +39,18 @@ func WAV(class string) []byte {
 	return cache["other"]
 }
 
-// build renders notes with a short attack and an exponential decay (a soft bell, no clicks).
+var delivery = []note{{587.3, 110}, {784, 110}, {1046.5, 220}}
+
+// build renders notes (freq 0 — a pause) with a short attack and an exponential decay (a soft bell, no clicks).
 func build(notes []note, volume float64) []byte {
 	var pcm []int16
 	for _, n := range notes {
 		count := rate * n.ms / 1000
 		for i := 0; i < count; i++ {
+			if n.freq == 0 {
+				pcm = append(pcm, 0)
+				continue
+			}
 			t := float64(i) / rate
 			env := math.Exp(-5 * t / (float64(n.ms) / 1000))
 			if i < rate/200 { // 5 ms attack
