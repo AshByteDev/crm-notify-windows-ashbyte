@@ -38,7 +38,7 @@ const (
 const activeWithin = time.Minute
 
 // Contract is the version of docs/NOTIFY_CONTRACT.md the app speaks; a CRM with another major version needs another app.
-const Contract = "1.11"
+const Contract = "1.12"
 
 // Places of the cards on the screen (the setting «Где показывать уведомления»).
 const (
@@ -697,7 +697,7 @@ func (a *App) play(class string) {
 		return
 	}
 	a.mu.Lock()
-	if time.Since(a.lastSound) < soundGap {
+	if class != api.SoundAlert && time.Since(a.lastSound) < soundGap { // a card to be noticed is always heard
 		a.mu.Unlock()
 		return
 	}

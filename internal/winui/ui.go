@@ -42,6 +42,12 @@ const trayClassName = "AshCRMNotifyTray"
 // timerHide wakes the UI when the next card must leave the screen.
 const timerHide = 1
 
+// timerAsk ends the question of «Прочитать все» in the strip.
+const timerAsk = 2
+
+// askFor is how long the strip asks «Прочитать все N?» before it gives up.
+const askFor = 5 * time.Second
+
 // menu commands
 const (
 	cmdLogin = iota + 1
@@ -120,6 +126,9 @@ type UI struct {
 
 	rep   replyUI    // the field of the answer
 	draft *app.Draft // the answer being written (app.View.Reply of the last refresh)
+	// asking: the strip asks whether to read all (the number); 0 — it does not. In the strip, not in a window: a
+	// window of Windows opens behind the others, the cards do not take the focus.
+	asking int
 }
 
 // AlreadyRunning holds a named mutex for the session of the user: a second start just exits.
@@ -149,8 +158,9 @@ func (u *UI) Quit() {
 
 // confirm asks yes/no.
 func confirm(text string) bool {
-	r, _, _ := pMessageBoxW.Call(0, uintptr(unsafe.Pointer(utf16(text))), uintptr(unsafe.Pointer(utf16("AshCRM Notify"))), 0x4|0x20) // YESNO|QUESTION
-	return r == 6                                                                                                                    // IDYES
+	// YESNO|QUESTION|SETFOREGROUND|TOPMOST: over the other windows, not somewhere behind them
+	r, _, _ := pMessageBoxW.Call(0, uintptr(unsafe.Pointer(utf16(text))), uintptr(unsafe.Pointer(utf16("AshCRM Notify"))), 0x4|0x20|0x10000|0x40000)
+	return r == 6 // IDYES
 }
 
 // Message shows a message box (errors before the tray exists).
@@ -369,6 +379,9 @@ func (u *UI) trayProc(hwnd, m, wp, lp uintptr) uintptr {
 			u.A.Q.Tick(time.Now())
 			u.refresh()
 		}
+		if wp == timerAsk {
+			u.stopAsking()
+		}
 		return 0
 	case wmPowerBroadcast:
 		if wp == pbtResumeAutomatic {
@@ -528,7 +541,12 @@ func (u *UI) refresh() {
 	}
 	var list []want
 	if t := stripText(v.Queue); t != "" {
+		if u.asking != 0 {
+			t = fmt.Sprintf("Прочитать все %d?", u.asking)
+		}
 		list = append(list, want{kind: "more", text: t})
+	} else {
+		u.asking = 0
 	}
 	if v.State == app.NeedServer {
 		if !u.portalAsked {
@@ -718,13 +736,27 @@ const (
 	stripReadW = 98
 )
 
-// readAll is «Прочитать все»: a question first when it is more than a few.
+// readAll is «Прочитать все»: when it is more than a few, the strip asks first («Да, прочитать» / «Отмена»), the
+// second click reads.
 func (u *UI) readAll() {
 	n := u.A.View().Queue.Unread
-	if n > confirmOver && !confirm(fmt.Sprintf("Отметить прочитанными все уведомления (%d)? Отменить это нельзя.", n)) {
+	if n > confirmOver && u.asking == 0 {
+		u.asking = n
+		pSetTimer.Call(u.tray, timerAsk, uintptr(askFor.Milliseconds()), 0)
+		u.refresh()
 		return
 	}
+	u.stopAsking()
 	u.A.ReadAll(u.Ctx)
+}
+
+// stopAsking: the strip shows its number and its words again.
+func (u *UI) stopAsking() {
+	pKillTimer.Call(u.tray, timerAsk)
+	if u.asking != 0 {
+		u.asking = 0
+		u.refresh()
+	}
 }
 
 // stripMenu is the right click on the strip.
@@ -857,6 +889,10 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 		case hitActMenu:
 			u.actionMenu(s)
 		case hitHideAll:
+			if u.asking != 0 { // «Отмена»
+				u.stopAsking()
+				break
+			}
 			u.A.HideAll()
 		case hitReadAll:
 			u.readAll()
@@ -979,6 +1015,10 @@ func accent(c api.Card) uintptr {
 	switch {
 	case c.Kind == queue.KindCall:
 		return colGreen
+	case c.Alert:
+		return colRed
+	case c.Kind == queue.KindDelivery:
+		return colDelivery
 	case c.From == api.FromStaff:
 		return colViolet
 	case c.Mention:
@@ -1022,7 +1062,13 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 			label string
 			hit   int
 		}{{hide, "Скрыть все", hitHideAll}, {read, "Прочитать все", hitReadAll}} {
-			if s.hover == b.hit {
+			if u.asking != 0 {
+				b.label = map[int]string{hitHideAll: "Отмена", hitReadAll: "Да, прочитать"}[b.hit]
+				if b.hit == hitReadAll { // the answer that cannot be undone stands out
+					p.round(rect{b.r.Left, b.r.Top + u.pi(4), b.r.Right, b.r.Bottom - u.pi(4)}, colRed, colRed, u.pi(8))
+				}
+			}
+			if s.hover == b.hit && !(u.asking != 0 && b.hit == hitReadAll) {
 				p.round(rect{b.r.Left, b.r.Top + u.pi(4), b.r.Right, b.r.Bottom - u.pi(4)}, colMoreHov, colMoreHov, u.pi(8))
 			}
 			p.text(b.label, b.r, u.font(12, true), colWhite, dtSingleLine|dtVCenter|dtCenter)
@@ -1052,7 +1098,11 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 			first = r.Left
 		}
 	}
-	p.text(cardTitle(s.card), rect{left, 0, first - u.pi(6), u.pi(36)}, u.font(13, true), colTitle, dtSingleLine|dtVCenter|dtEndEllipsis)
+	title := colTitle
+	if s.card.Alert {
+		title = colRed
+	}
+	p.text(cardTitle(s.card), rect{left, 0, first - u.pi(6), u.pi(36)}, u.font(13, true), title, dtSingleLine|dtVCenter|dtEndEllipsis)
 	if s.card.Talking() { // «Разговор»: the number on one line, the buttons in words below
 		p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(56)}, u.font(13, false), colBody, dtSingleLine|dtVCenter|dtEndEllipsis)
 		u.drawTalkButtons(p, s)

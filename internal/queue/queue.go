@@ -34,6 +34,9 @@ const KindTest = "test"
 // end of the call: it is in the snapshot, so a snapshot without it drops it.
 const KindCall = "call"
 
+// KindDelivery is «Доставка» (contract 1.12): a request (delivery-…) or the chat of a request (chat-…).
+const KindDelivery = "delivery"
+
 // CallFor is how long «Звонит» stays at most: the clear of the CRM may be lost with a broken connection. «Разговор» has
 // no limit: the snapshot after reconnecting tells whether it goes on.
 const CallFor = 3 * time.Minute
@@ -148,6 +151,13 @@ func (m *Manager) settle() {
 			}
 			return 1
 		}
+		// a card to be noticed is not pushed into the strip by ordinary ones (contract 1.12)
+		if aa, ab := m.cards[a].Alert, m.cards[b].Alert; aa != ab {
+			if aa {
+				return -1
+			}
+			return 1
+		}
 		return int(m.order[b] - m.order[a])
 	})
 	m.visible = all[:min(Max, len(all))]
@@ -232,10 +242,13 @@ func (m *Manager) Local(c api.Card) {
 }
 
 func soundOf(c api.Card) string {
-	if c.Sound == api.SoundClient {
-		return api.SoundClient
+	switch {
+	case c.Alert:
+		return api.SoundAlert
+	case c.Sound == api.SoundClient, c.Sound == api.SoundDelivery:
+		return c.Sound
 	}
-	return api.SoundOther
+	return api.SoundOther // an unknown sound too
 }
 
 // Clear drops cards (read elsewhere, the conversation left the queue, the call ended).
