@@ -38,7 +38,7 @@ const (
 const activeWithin = time.Minute
 
 // Contract is the version of docs/NOTIFY_CONTRACT.md the app speaks; a CRM with another major version needs another app.
-const Contract = "1.13"
+const Contract = "1.14"
 
 // Places of the cards on the screen (the setting «Где показывать уведомления»).
 const (

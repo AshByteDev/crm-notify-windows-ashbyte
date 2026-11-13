@@ -1161,7 +1161,8 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 	}
 	p.text(cardTitle(s.card), rect{left, 0, first - u.pi(6), u.pi(36)}, u.font(13, true), title, dtSingleLine|dtVCenter|dtEndEllipsis)
 	if s.card.Talking() { // «Разговор»: the number on one line, the buttons in words below
-		p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(56)}, u.font(13, false), colBody, dtSingleLine|dtVCenter|dtEndEllipsis)
+		x := u.drawHandset(p, s, u.pi(45)-u.pi(handsetSize)/2)
+		p.text(s.card.Body, rect{x, u.pi(34), w - u.pi(12), u.pi(56)}, u.font(13, false), colBody, dtSingleLine|dtVCenter|dtEndEllipsis)
 		u.drawTalkButtons(p, s)
 	} else if s.pic != nil { // the sticker in place of the text; «Иван: Стикер» of a group stays next to it
 		size := u.pi(stickerPx)
@@ -1171,7 +1172,8 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 			p.text(s.card.Body, rect{x, u.pi(stickerTop), w - u.pi(12), u.pi(stickerTop) + size}, u.font(13, false), colMuted, dtWordBreak|dtEndEllipsis|dtEditControl)
 		}
 	} else {
-		p.text(s.card.Body, rect{u.pi(14), u.pi(34), w - u.pi(12), u.pi(70)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
+		x := u.drawHandset(p, s, u.pi(36)) // the middle of the first line of the text
+		p.text(s.card.Body, rect{x, u.pi(34), w - u.pi(12), u.pi(70)}, u.font(13, false), colBody, dtWordBreak|dtEndEllipsis|dtEditControl)
 	}
 	if s.card.Reply != nil {
 		u.drawReply(p, s)
@@ -1194,6 +1196,30 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 		p.round(at, colHint, colHint, u.pi(8))
 		p.text(cat.name, at, f, colWhite, dtSingleLine|dtVCenter|dtCenter)
 	}
+}
+
+// handsetSize: the handset of a call before the text (contract 1.14), px
+const handsetSize = 14
+
+// drawHandset draws the handset of the kind of the call at the start of the text, top at top; it returns where the
+// text begins.
+func (u *UI) drawHandset(p painter, s *slot, top int32) int32 {
+	left := u.pi(14)
+	if _, ok := handsetOf(s.card.CallKind); !ok {
+		return left
+	}
+	size := u.pi(handsetSize)
+	key := fmt.Sprint("phone", s.card.CallKind, size)
+	if u.dots == nil {
+		u.dots = map[string][]byte{}
+	}
+	pix, ok := u.dots[key]
+	if !ok {
+		pix = bgra(handset(s.card.CallKind, int(size)))
+		u.dots[key] = pix
+	}
+	p.pixels(pix, left, top, size, size)
+	return left + size + u.pi(5)
 }
 
 // iconPixels is the icon of a category of size px, kept for the next paints.

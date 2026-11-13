@@ -31,7 +31,7 @@ var (
 )
 
 var categories = map[string]category{
-	"call_missed":           {"Пропущенный звонок", catCalls},
+	"call_missed":           {"Пропущенный звонок", catAlert}, // red since 1.14, as a missed one in «Звонки»
 	"call_incoming":         {"Звонок", catCalls},
 	"queue":                 {"Клиент в очереди", catClients},
 	"client_message":        {"Сообщение клиента", catClients},
