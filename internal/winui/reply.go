@@ -321,7 +321,7 @@ func (u *UI) badges(p painter, c api.Card, left int32) int32 {
 	if c.From == api.FromStaff {
 		list = append(list, badge{"внутри", colViolet})
 	}
-	if c.Kind == queue.KindDelivery {
+	if _, ok := categoryOf(c.Category); !ok && c.Kind == queue.KindDelivery { // with a category its icon says it
 		col := colDelivery
 		if c.Alert {
 			col = colRed

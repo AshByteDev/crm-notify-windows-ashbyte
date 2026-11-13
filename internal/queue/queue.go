@@ -56,6 +56,8 @@ type View struct {
 	Unread int
 	// Hidden: the unread ones that are not on the screen — the number of the strip.
 	Hidden int
+	// HiddenCategories: the categories of the hidden ones (contract 1.13), each once, the newest first; none — "".
+	HiddenCategories []string
 	// Next: when something must change by itself (a check leaves, a lost call ends, the list closes); zero — never.
 	Next time.Time
 	// Browsing: the person opened the list from the strip; Visible is a window of it, Offset cards from the newest.
@@ -521,6 +523,23 @@ func (m *Manager) Reset() {
 	m.reset()
 }
 
+func (m *Manager) hiddenCategories() []string {
+	var keys []string
+	for k := range m.cards {
+		if m.counted(k) && !slices.Contains(m.visible, k) {
+			keys = append(keys, k)
+		}
+	}
+	slices.SortFunc(keys, func(a, b string) int { return int(m.order[b] - m.order[a]) })
+	var out []string
+	for _, k := range keys {
+		if c := m.cards[k].Category; !slices.Contains(out, c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // View returns what to show.
 func (m *Manager) View() View {
 	m.mu.Lock()
@@ -566,6 +585,8 @@ func (m *Manager) View() View {
 	v.Hidden = v.Unread - shown
 	if m.browsing {
 		v.Hidden = v.Unread
+	} else {
+		v.HiddenCategories = m.hiddenCategories()
 	}
 	next := func(at time.Time) {
 		if !at.IsZero() && (v.Next.IsZero() || at.Before(v.Next)) {

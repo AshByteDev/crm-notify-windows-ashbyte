@@ -31,6 +31,8 @@ type Card struct {
 	// Alert: a card to be noticed (contract 1.12: a ping of the dispatcher, «Не удалось», «Срок прошёл», an urgent
 	// request): red, louder, not pushed off the screen by ordinary cards.
 	Alert bool `json:"alert,omitempty"`
+	// Category: where the card comes from (contract 1.13 §5.3.1) — its icon and colour; "" or unknown — by Kind.
+	Category string `json:"category,omitempty"`
 }
 
 // Sticker is the picture of a sticker: Code "<pack>/<id>", Hash the SHA-256 of the PNG at URL (a path of the portal).
@@ -118,7 +120,7 @@ type Action struct {
 func Same(a, b Card) bool {
 	if a.Key != b.Key || a.Kind != b.Kind || a.Title != b.Title || a.Body != b.Body || a.URL != b.URL || a.Count != b.Count ||
 		a.Sound != b.Sound || !a.At.Equal(b.At) || a.Mention != b.Mention || a.Talking() != b.Talking() || len(a.Actions) != len(b.Actions) ||
-		a.From != b.From || !sameReply(a.Reply, b.Reply) || !sameSticker(a.Sticker, b.Sticker) || a.Alert != b.Alert {
+		a.From != b.From || !sameReply(a.Reply, b.Reply) || !sameSticker(a.Sticker, b.Sticker) || a.Alert != b.Alert || a.Category != b.Category {
 		return false
 	}
 	for i := range a.Actions {

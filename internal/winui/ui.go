@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"image"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -82,6 +83,7 @@ const (
 	hitAct1 // the buttons of «Разговор»: «Карточка клиента», «Написать в …», «▾»
 	hitAct2
 	hitActMenu
+	hitIcon // the icon of the category: its name in a hint, a click — as on the card
 )
 
 // cmdAction + i in the menu «▾» of «Разговор» is the action i of the card.
@@ -96,6 +98,7 @@ type slot struct {
 	hover int
 	shown bool
 	pic   image.Image // the sticker of the card (contract 1.11); nil — the text
+	cats  []string    // the strip: the categories of what is not on the screen
 }
 
 // UI owns every window; all of it runs on one locked OS thread (the Win32 rule).
@@ -538,13 +541,15 @@ func (u *UI) refresh() {
 		kind, text string
 		card       api.Card
 		pic        image.Image
+		cats       []string
 	}
 	var list []want
 	if t := stripText(v.Queue); t != "" {
+		cats := stripCategories(v.Queue.HiddenCategories)
 		if u.asking != 0 {
-			t = fmt.Sprintf("Прочитать все %d?", u.asking)
+			t, cats = fmt.Sprintf("Прочитать все %d?", u.asking), nil
 		}
-		list = append(list, want{kind: "more", text: t})
+		list = append(list, want{kind: "more", text: t, cats: cats})
 	} else {
 		u.asking = 0
 	}
@@ -592,8 +597,9 @@ func (u *UI) refresh() {
 			continue
 		}
 		w, h, at := list[i], heights[i], places[i]
-		changed := rescaled || w.card.Reply != nil || s.kind != w.kind || s.text != w.text || s.pic != w.pic || !api.Same(s.card, w.card)
-		s.kind, s.text, s.card, s.pic = w.kind, w.text, w.card, w.pic
+		changed := rescaled || w.card.Reply != nil || s.kind != w.kind || s.text != w.text || s.pic != w.pic || !api.Same(s.card, w.card) ||
+			!slices.Equal(s.cats, w.cats)
+		s.kind, s.text, s.card, s.pic, s.cats = w.kind, w.text, w.card, w.pic, w.cats
 		pSetWindowPos.Call(s.hwnd, hwndTopmost, uintptr(at.X), uintptr(at.Y), uintptr(u.pi(cardW)), uintptr(h), swpNoActivate|swpShowWindow)
 		rgn, _, _ := pCreateRoundRectRgn.Call(0, 0, uintptr(u.pi(cardW)+1), uintptr(h+1), uintptr(u.pi(radius)), uintptr(u.pi(radius)))
 		pSetWindowRgn.Call(s.hwnd, rgn, 1)
@@ -649,6 +655,22 @@ func (u *UI) buttons(s *slot) (open, read, close rect) {
 	return
 }
 
+// iconRect is the icon of the category at the start of the first line (contract 1.13); an empty rect — none.
+func (u *UI) iconRect(s *slot) rect {
+	if s.kind != "card" || service(s) {
+		return rect{}
+	}
+	if _, ok := categoryOf(s.card.Category); !ok {
+		return rect{}
+	}
+	left, size := u.pi(12), u.pi(iconSize)
+	top := (u.pi(36) - size) / 2
+	return rect{left, top, left + size, top + size}
+}
+
+// iconSize: the icon of the category, px
+const iconSize = 24
+
 // talkRects are the worded buttons of «Разговор» in the last row: the first, the second, «▾» (an empty rect — none).
 func (u *UI) talkRects(s *slot) (b1, b2, bm rect) {
 	first, second, menu := talkButtons(s.card)
@@ -696,6 +718,8 @@ func (u *UI) hit(s *slot, x, y int32) int {
 		}
 	}
 	switch {
+	case in(u.iconRect(s), x, y):
+		return hitIcon
 	case in(cl, x, y):
 		return hitClose
 	case in(read, x, y) && s.kind == "signin":
@@ -869,7 +893,7 @@ func (u *UI) cardProc(hwnd, m, wp, lp uintptr) uintptr {
 			} else if s.kind == "card" {
 				u.A.Open(s.card.Key)
 			}
-		case hitBody:
+		case hitBody, hitIcon:
 			if s.kind == "more" {
 				if u.A.View().Queue.Browsing {
 					u.A.Q.EndBrowse()
@@ -1011,7 +1035,15 @@ func (p painter) text(s string, r rect, font, color uintptr, flags uintptr) {
 	pDrawTextW.Call(p.dc, uintptr(unsafe.Pointer(utf16(s))), ^uintptr(0), ptr(&r), flags|dtNoPrefix)
 }
 
+// accent is the colour of the band: by the category (contract 1.13), a card to be noticed red over it; with no known
+// category — by the kind, as before.
 func accent(c api.Card) uintptr {
+	if cat, ok := categoryOf(c.Category); ok {
+		if c.Alert {
+			return colRed
+		}
+		return rgb(cat.color.R, cat.color.G, cat.color.B)
+	}
 	switch {
 	case c.Kind == queue.KindCall:
 		return colGreen
@@ -1056,7 +1088,26 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 	if s.kind == "more" {
 		p.fill(cr, colMoreBg)
 		hide, read := u.stripButtons(s)
-		p.text(s.text, rect{u.pi(14), 0, hide.Left - u.pi(6), h}, u.font(12, false), colWhite, dtSingleLine|dtVCenter|dtEndEllipsis)
+		x := u.pi(14)
+		if u.dots == nil {
+			u.dots = map[string][]byte{}
+		}
+		for _, c := range s.cats { // where the hidden ones come from: a point of the colour of each category
+			cat, _ := categoryOf(c)
+			size := u.pi(8)
+			key := fmt.Sprint("disk", c, size)
+			pix, ok := u.dots[key]
+			if !ok {
+				pix = bgra(disk(int(size), cat.color, rgba(0x2B, 0x31, 0x38))) // colMoreBg
+				u.dots[key] = pix
+			}
+			p.pixels(pix, x, (h-size)/2, size, size)
+			x += size + u.pi(4)
+		}
+		if len(s.cats) > 0 {
+			x += u.pi(4)
+		}
+		p.text(s.text, rect{x, 0, hide.Left - u.pi(6), h}, u.font(12, false), colWhite, dtSingleLine|dtVCenter|dtEndEllipsis)
 		for _, b := range []struct {
 			r     rect
 			label string
@@ -1084,10 +1135,16 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 	open, read, cl := u.buttons(s)
 	left := u.pi(14)
 	call := s.card.Kind == queue.KindCall
-	if call { // a call is now: a telephone in place of the time
+	icon := u.iconRect(s)
+	if icon.Right > 0 { // where it comes from; the telephone of a call is the time of it: a call is now
+		size := icon.Right - icon.Left
+		p.pixels(u.iconPixels(s.card.Category, size), icon.Left, icon.Top, size, size)
+		left = icon.Right + u.pi(8)
+	} else if call {
 		p.text("☎", rect{left, 0, left + u.pi(24), u.pi(36)}, u.symbolFont(16), colGreen, dtSingleLine|dtVCenter)
 		left += u.pi(28)
-	} else if t := clock(s.card.At); t != "" {
+	}
+	if t := clock(s.card.At); t != "" && !call {
 		p.text(t, rect{left, 0, left + u.pi(38), u.pi(36)}, u.font(12, false), colMuted, dtSingleLine|dtVCenter)
 		left += u.pi(42)
 	}
@@ -1131,6 +1188,26 @@ func (u *UI) drawCard(p painter, s *slot, cr rect) {
 		p.round(at, colHint, colHint, u.pi(8))
 		p.text(hint, at, u.font(12, false), colWhite, dtSingleLine|dtVCenter|dtCenter)
 	}
+	if cat, ok := categoryOf(s.card.Category); ok && s.hover == hitIcon {
+		f := u.font(12, false)
+		at := rect{icon.Right + u.pi(6), u.pi(8), icon.Right + u.pi(6) + p.measure(cat.name, f) + u.pi(16), u.pi(8 + dot)}
+		p.round(at, colHint, colHint, u.pi(8))
+		p.text(cat.name, at, f, colWhite, dtSingleLine|dtVCenter|dtCenter)
+	}
+}
+
+// iconPixels is the icon of a category of size px, kept for the next paints.
+func (u *UI) iconPixels(name string, size int32) []byte {
+	key := fmt.Sprint("cat", name, size)
+	if u.dots == nil {
+		u.dots = map[string][]byte{}
+	}
+	pix, ok := u.dots[key]
+	if !ok {
+		pix = bgra(categoryIcon(name, int(size)))
+		u.dots[key] = pix
+	}
+	return pix
 }
 
 // drawTalkButtons: «Карточка клиента» in grey, the main «Написать в …» in blue, «▾» with the rest.
